@@ -83,11 +83,28 @@ class MorphologyAnalyzer {
                     <div class="metric-card">
                         <div class="metric-value">${this.formatNum(result.boundary_fractal_dimension, 4)}</div>
                         <div class="metric-label">边界分形维数</div>
+                        <div class="metric-meta">
+                            ${this.renderFractalConfidence(
+                                result.boundary_fd_confidence_lower,
+                                result.boundary_fd_confidence_upper,
+                                result.boundary_fd_quality
+                            )}
+                        </div>
                     </div>
                     <div class="metric-card">
                         <div class="metric-value">${this.formatNum(result.road_network_fractal_dimension, 4)}</div>
                         <div class="metric-label">路网分形维数</div>
+                        <div class="metric-meta">
+                            ${this.renderFractalConfidence(
+                                result.road_fd_confidence_lower,
+                                result.road_fd_confidence_upper,
+                                result.road_fd_quality
+                            )}
+                        </div>
                     </div>
+                </div>
+                <div class="metric-note">
+                    <small>采用盒计数法、周长-面积法、分规法三算法加权融合，Bootstrap 500次重采样计算95%置信区间</small>
                 </div>
             </div>
 
@@ -134,6 +151,19 @@ class MorphologyAnalyzer {
             return 'N/A';
         }
         return value.toFixed(decimals);
+    }
+
+    renderFractalConfidence(lower, upper, quality) {
+        const parts = [];
+        if (lower !== null && lower !== undefined && upper !== null && upper !== undefined) {
+            parts.push(`95% CI: [${this.formatNum(lower, 3)}, ${this.formatNum(upper, 3)}]`);
+        }
+        if (quality !== null && quality !== undefined) {
+            const qClass = quality >= 0.7 ? 'quality-high' : quality >= 0.4 ? 'quality-medium' : 'quality-low';
+            const qLabel = quality >= 0.7 ? '高' : quality >= 0.4 ? '中' : '低';
+            parts.push(`<span class="${qClass}">数据质量: ${qLabel} (${this.formatNum(quality, 2)})</span>`);
+        }
+        return parts.join('<br>');
     }
 
     getCurrentResult() {

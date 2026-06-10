@@ -155,7 +155,6 @@ CREATE TABLE IF NOT EXISTS morphology_analyses (
     id SERIAL PRIMARY KEY,
     city_site_id INTEGER NOT NULL REFERENCES city_sites(id) ON DELETE CASCADE,
     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    -- 空间句法指标
     integration_global DOUBLE PRECISION,
     integration_local DOUBLE PRECISION,
     choice_global DOUBLE PRECISION,
@@ -163,17 +162,20 @@ CREATE TABLE IF NOT EXISTS morphology_analyses (
     mean_depth DOUBLE PRECISION,
     total_depth DOUBLE PRECISION,
     connectivity DOUBLE PRECISION,
-    -- 分形维数
     boundary_fractal_dimension DOUBLE PRECISION,
     road_network_fractal_dimension DOUBLE PRECISION,
-    -- 形态指标
     compactness_index DOUBLE PRECISION,
     elongation_ratio DOUBLE PRECISION,
     road_density DOUBLE PRECISION,
     intersection_density DOUBLE PRECISION,
-    -- 功能区指标
     functional_diversity DOUBLE PRECISION,
     functional_mixing DOUBLE PRECISION,
+    boundary_fd_quality DOUBLE PRECISION,
+    road_fd_quality DOUBLE PRECISION,
+    boundary_fd_confidence_lower DOUBLE PRECISION,
+    boundary_fd_confidence_upper DOUBLE PRECISION,
+    road_fd_confidence_lower DOUBLE PRECISION,
+    road_fd_confidence_upper DOUBLE PRECISION,
     notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

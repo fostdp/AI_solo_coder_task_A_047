@@ -105,6 +105,12 @@ pub struct MorphologyAnalysis {
     pub intersection_density: Option<f64>,
     pub functional_diversity: Option<f64>,
     pub functional_mixing: Option<f64>,
+    pub boundary_fd_quality: Option<f64>,
+    pub road_fd_quality: Option<f64>,
+    pub boundary_fd_confidence_lower: Option<f64>,
+    pub boundary_fd_confidence_upper: Option<f64>,
+    pub road_fd_confidence_lower: Option<f64>,
+    pub road_fd_confidence_upper: Option<f64>,
     pub notes: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
 }

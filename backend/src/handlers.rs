@@ -327,7 +327,11 @@ pub async fn get_morphology(
                choice_global, choice_local, mean_depth, total_depth, connectivity,
                boundary_fractal_dimension, road_network_fractal_dimension,
                compactness_index, elongation_ratio, road_density, intersection_density,
-               functional_diversity, functional_mixing, notes, created_at
+               functional_diversity, functional_mixing,
+               boundary_fd_quality, road_fd_quality,
+               boundary_fd_confidence_lower, boundary_fd_confidence_upper,
+               road_fd_confidence_lower, road_fd_confidence_upper,
+               notes, created_at
         FROM morphology_analyses
         WHERE city_site_id = $1
         ORDER BY analysis_date DESC
@@ -359,6 +363,12 @@ pub async fn get_morphology(
                 intersection_density: row.intersection_density,
                 functional_diversity: row.functional_diversity,
                 functional_mixing: row.functional_mixing,
+                boundary_fd_quality: row.boundary_fd_quality,
+                road_fd_quality: row.road_fd_quality,
+                boundary_fd_confidence_lower: row.boundary_fd_confidence_lower,
+                boundary_fd_confidence_upper: row.boundary_fd_confidence_upper,
+                road_fd_confidence_lower: row.road_fd_confidence_lower,
+                road_fd_confidence_upper: row.road_fd_confidence_upper,
                 notes: row.notes,
                 created_at: row.created_at.map(|dt| dt.and_utc()),
             };
@@ -410,10 +420,12 @@ pub async fn analyze_morphology(
     .await?;
 
     let boundary_points = extract_polygon_points(&city_row.geom_json);
-    let boundary_fd = boundary_fractal_dimension(&boundary_points, 8);
+    let boundary_fd_result = boundary_fractal_dimension_robust(&boundary_points, 8);
+    let boundary_fd = boundary_fd_result.weighted_average;
 
     let road_segments = extract_road_segments(&roads_rows);
-    let road_fd = network_fractal_dimension(&road_segments, 8);
+    let road_fd_result = network_fractal_dimension_robust(&road_segments, 8);
+    let road_fd = road_fd_result.weighted_average;
 
     let (min_x, max_x, min_y, max_y) = bounding_box_points(&boundary_points);
     let area = polygon_area(&boundary_points);
@@ -421,15 +433,37 @@ pub async fn analyze_morphology(
     let compactness = compactness_index(area, perimeter);
     let elongation = elongation_ratio(min_x, max_x, min_y, max_y);
 
-    let mut axial_lines = Vec::new();
+    let mut axial_lines = Vec::with_capacity(road_segments.len());
     for (i, segment) in road_segments.iter().enumerate() {
         let line = AxialLine::new(i, segment.0.0, segment.0.1, segment.1.0, segment.1.1);
         axial_lines.push(line);
     }
-    let graph = build_axial_graph(&axial_lines);
+
+    let graph = if axial_lines.len() > 100 {
+        build_axial_graph_optimized(&axial_lines)
+    } else {
+        let mut g = SpatialGraph::with_capacity(axial_lines.len());
+        for line in &axial_lines {
+            let (mx, my) = line.midpoint();
+            g.add_node(mx, my);
+        }
+        for i in 0..axial_lines.len() {
+            for j in (i + 1)..axial_lines.len() {
+                if lines_intersect(
+                    axial_lines[i].start_x, axial_lines[i].start_y,
+                    axial_lines[i].end_x, axial_lines[i].end_y,
+                    axial_lines[j].start_x, axial_lines[j].start_y,
+                    axial_lines[j].end_x, axial_lines[j].end_y,
+                ) {
+                    g.add_edge(i, j);
+                }
+            }
+        }
+        g.optimize_memory();
+        g
+    };
 
     let avg_integration = graph.average_integration_global();
-    let avg_choice = graph.average_choice_global();
     let avg_connectivity = graph.average_connectivity();
     let avg_mean_depth = graph.average_mean_depth();
     let avg_total_depth = graph.average_total_depth();
@@ -438,10 +472,27 @@ pub async fn analyze_morphology(
     } else {
         0.0
     };
-    let local_choice = if graph.node_count() > 0 {
-        graph.choice_local(0, 3)
+
+    let all_choice = if graph.node_count() > 500 {
+        graph.choice_global_brandes_chunked(32)
+    } else {
+        graph.choice_global_brandes()
+    };
+    let avg_choice = if all_choice.is_empty() {
+        0.0
+    } else {
+        all_choice.iter().sum::<f64>() / all_choice.len() as f64
+    };
+    let local_choice = if graph.node_count() > 0 && !all_choice.is_empty() {
+        *all_choice.get(0).unwrap_or(&0.0)
     } else {
         0.0
+    };
+
+    let per_road_metrics = if graph.node_count() > 0 && axial_lines.len() >= graph.node_count() {
+        graph.compute_all_metrics(3)
+    } else {
+        Vec::new()
     };
 
     let road_density = if area > 0.0 {
@@ -469,57 +520,67 @@ pub async fn analyze_morphology(
     let zone_areas: Vec<f64> = zone_type_areas.values().copied().collect();
     let functional_mixing = functional_mixing_index(&zone_areas);
 
-    for (i, _line) in axial_lines.iter().enumerate() {
-        if i < roads_rows.len() {
-            let road_id = roads_rows[i].id;
-            let integration = if i < graph.nodes.len() {
-                graph.integration_global(i)
-            } else {
-                0.0
-            };
-            let choice = if i < graph.nodes.len() {
-                graph.choice_global(i)
-            } else {
-                0.0
-            };
-            let depth = if i < graph.nodes.len() {
-                graph.mean_depth(i)
-            } else {
-                0.0
-            };
-            let connectivity = if i < graph.nodes.len() {
-                graph.connectivity(i) as i32
-            } else {
-                0
-            };
-            let control = if i < graph.nodes.len() {
-                graph.control(i)
-            } else {
-                0.0
-            };
+    if !per_road_metrics.is_empty() {
+        for (i, metrics) in per_road_metrics.iter().enumerate() {
+            if i < roads_rows.len() {
+                let road_id = roads_rows[i].id;
+                sqlx::query!(
+                    r#"
+                    INSERT INTO road_syntax_results
+                    (road_id, city_site_id, integration, choice, depth, connectivity, control)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    ON CONFLICT (road_id) DO UPDATE
+                    SET integration = EXCLUDED.integration,
+                        choice = EXCLUDED.choice,
+                        depth = EXCLUDED.depth,
+                        connectivity = EXCLUDED.connectivity,
+                        control = EXCLUDED.control
+                    "#,
+                    road_id,
+                    site_id,
+                    metrics.integration,
+                    metrics.choice,
+                    metrics.depth,
+                    metrics.connectivity,
+                    metrics.control
+                )
+                .execute(pool.get_ref())
+                .await?;
+            }
+        }
+    } else {
+        for (i, _line) in axial_lines.iter().enumerate() {
+            if i < roads_rows.len() {
+                let road_id = roads_rows[i].id;
+                let integration = graph.integration_global(i);
+                let choice = all_choice.get(i).copied().unwrap_or(0.0);
+                let depth = graph.mean_depth(i);
+                let connectivity = graph.connectivity(i) as i32;
+                let control = graph.control(i);
 
-            sqlx::query!(
-                r#"
-                INSERT INTO road_syntax_results
-                (road_id, city_site_id, integration, choice, depth, connectivity, control)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                ON CONFLICT (road_id) DO UPDATE
-                SET integration = EXCLUDED.integration,
-                    choice = EXCLUDED.choice,
-                    depth = EXCLUDED.depth,
-                    connectivity = EXCLUDED.connectivity,
-                    control = EXCLUDED.control
-                "#,
-                road_id,
-                site_id,
-                integration,
-                choice,
-                depth,
-                connectivity,
-                control
-            )
-            .execute(pool.get_ref())
-            .await?;
+                sqlx::query!(
+                    r#"
+                    INSERT INTO road_syntax_results
+                    (road_id, city_site_id, integration, choice, depth, connectivity, control)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    ON CONFLICT (road_id) DO UPDATE
+                    SET integration = EXCLUDED.integration,
+                        choice = EXCLUDED.choice,
+                        depth = EXCLUDED.depth,
+                        connectivity = EXCLUDED.connectivity,
+                        control = EXCLUDED.control
+                    "#,
+                    road_id,
+                    site_id,
+                    integration,
+                    choice,
+                    depth,
+                    connectivity,
+                    control
+                )
+                .execute(pool.get_ref())
+                .await?;
+            }
         }
     }
 
@@ -529,13 +590,21 @@ pub async fn analyze_morphology(
         (city_site_id, integration_global, integration_local, choice_global, choice_local,
          mean_depth, total_depth, connectivity, boundary_fractal_dimension,
          road_network_fractal_dimension, compactness_index, elongation_ratio,
-         road_density, intersection_density, functional_diversity, functional_mixing, notes)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+         road_density, intersection_density, functional_diversity, functional_mixing,
+         boundary_fd_quality, road_fd_quality,
+         boundary_fd_confidence_lower, boundary_fd_confidence_upper,
+         road_fd_confidence_lower, road_fd_confidence_upper, notes)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                $17, $18, $19, $20, $21, $22, $23)
         RETURNING id, city_site_id, analysis_date, integration_global, integration_local,
                   choice_global, choice_local, mean_depth, total_depth, connectivity,
                   boundary_fractal_dimension, road_network_fractal_dimension,
                   compactness_index, elongation_ratio, road_density, intersection_density,
-                  functional_diversity, functional_mixing, notes, created_at
+                  functional_diversity, functional_mixing,
+                  boundary_fd_quality, road_fd_quality,
+                  boundary_fd_confidence_lower, boundary_fd_confidence_upper,
+                  road_fd_confidence_lower, road_fd_confidence_upper,
+                  notes, created_at
         "#,
         site_id,
         avg_integration,
@@ -553,6 +622,12 @@ pub async fn analyze_morphology(
         intersection_density,
         functional_diversity,
         functional_mixing,
+        Some(boundary_fd_result.overall_quality),
+        Some(road_fd_result.overall_quality),
+        Some(boundary_fd_result.confidence_lower),
+        Some(boundary_fd_result.confidence_upper),
+        Some(road_fd_result.confidence_lower),
+        Some(road_fd_result.confidence_upper),
         Some("自动生成的形态分析结果".to_string())
     )
     .fetch_one(pool.get_ref())
@@ -577,6 +652,12 @@ pub async fn analyze_morphology(
         intersection_density: result.intersection_density,
         functional_diversity: result.functional_diversity,
         functional_mixing: result.functional_mixing,
+        boundary_fd_quality: result.boundary_fd_quality,
+        road_fd_quality: result.road_fd_quality,
+        boundary_fd_confidence_lower: result.boundary_fd_confidence_lower,
+        boundary_fd_confidence_upper: result.boundary_fd_confidence_upper,
+        road_fd_confidence_lower: result.road_fd_confidence_lower,
+        road_fd_confidence_upper: result.road_fd_confidence_upper,
         notes: result.notes,
         created_at: result.created_at.map(|dt| dt.and_utc()),
     };

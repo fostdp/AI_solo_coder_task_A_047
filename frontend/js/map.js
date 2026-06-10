@@ -7,7 +7,7 @@ class CityMap {
         this.zonesLayer = null;
         this.buildingsLayer = null;
         this.syntaxLayer = null;
-        this.canvasLayer = null;
+        this.canvasRenderer = null;
         this.currentView = 'plan';
         this.zonesData = [];
         this.roadsData = [];
@@ -15,14 +15,22 @@ class CityMap {
         this.roadSyntaxData = [];
         this.onZoneClick = null;
         this.onBuildingClick = null;
+        this.renderFrame = null;
+        this.lastRenderZoom = -1;
+        this.lastRenderBounds = null;
+        this.loadingPromises = new Map();
     }
 
     init() {
+        this.canvasRenderer = L.canvas({ padding: 0.5 });
+
         this.map = L.map('map', {
             center: [34.0, 108.0],
             zoom: 12,
             minZoom: 8,
-            maxZoom: 18
+            maxZoom: 18,
+            preferCanvas: true,
+            renderer: this.canvasRenderer
         });
 
         L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
@@ -36,46 +44,202 @@ class CityMap {
         this.buildingsLayer = L.layerGroup().addTo(this.map);
         this.syntaxLayer = L.layerGroup().addTo(this.map);
 
-        this.setupCanvasLayer();
         this.setupLayerControls();
+        this.setupPerformanceEvents();
     }
 
-    setupCanvasLayer() {
-        const canvas = L.canvas();
-        this.canvasLayer = canvas;
+    setupPerformanceEvents() {
+        this.map.on('movestart', () => {
+            if (this.renderFrame) {
+                cancelAnimationFrame(this.renderFrame);
+                this.renderFrame = null;
+            }
+        });
+
+        this.map.on('moveend zoomend', L.Util.throttle(() => {
+            this.scheduleRender();
+        }, 150, this));
+    }
+
+    scheduleRender() {
+        if (this.renderFrame) return;
+        this.renderFrame = requestAnimationFrame(() => {
+            this.renderFrame = null;
+            this.renderVisible();
+        });
+    }
+
+    getRenderLevel(zoom) {
+        if (zoom < 11) return 'overview';
+        if (zoom < 13) return 'low';
+        if (zoom < 15) return 'medium';
+        return 'high';
+    }
+
+    filterFeaturesInView(bounds, features, geomKey = 'geom') {
+        if (!bounds || !features) return [];
+        return features.filter(f => {
+            if (!f[geomKey] || !f[geomKey].coordinates) return false;
+            const bb = this.featureBBox(f[geomKey]);
+            if (!bb) return true;
+            return bounds.overlaps(L.latLngBounds([bb.minY, bb.minX], [bb.maxY, bb.maxX]));
+        });
+    }
+
+    featureBBox(geom) {
+        if (!geom || !geom.coordinates) return null;
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        const traverse = (coords) => {
+            if (typeof coords[0] === 'number') {
+                minX = Math.min(minX, coords[0]);
+                maxX = Math.max(maxX, coords[0]);
+                minY = Math.min(minY, coords[1]);
+                maxY = Math.max(maxY, coords[1]);
+            } else {
+                coords.forEach(c => traverse(c));
+            }
+        };
+        traverse(geom.coordinates);
+        if (!isFinite(minX)) return null;
+        return { minX, maxX, minY, maxY };
+    }
+
+    renderVisible() {
+        const zoom = this.map.getZoom();
+        const bounds = this.map.getBounds();
+        const level = this.getRenderLevel(zoom);
+
+        if (this.lastRenderZoom === zoom && this.lastRenderBounds &&
+            this.lastRenderBounds.equals(bounds)) {
+            return;
+        }
+        this.lastRenderZoom = zoom;
+        this.lastRenderBounds = bounds;
+
+        if (level === 'overview') {
+            this.renderOverview(bounds);
+        } else if (level === 'low') {
+            this.renderLowDetail(bounds);
+        } else if (level === 'medium') {
+            this.renderMediumDetail(bounds);
+        } else {
+            this.renderHighDetail(bounds);
+        }
+    }
+
+    renderOverview(bounds) {
+        this.roadsLayer.clearLayers();
+        this.zonesLayer.clearLayers();
+        this.buildingsLayer.clearLayers();
+        this.renderAggregateBuildings(bounds);
+    }
+
+    renderLowDetail(bounds) {
+        this.roadsLayer.clearLayers();
+        this.zonesLayer.clearLayers();
+        this.buildingsLayer.clearLayers();
+
+        const visibleZones = this.filterFeaturesInView(bounds, this.zonesData);
+        this.drawZones(visibleZones, true);
+
+        this.renderAggregateBuildings(bounds);
+    }
+
+    renderMediumDetail(bounds) {
+        this.buildingsLayer.clearLayers();
+
+        const visibleRoads = this.filterFeaturesInView(bounds, this.roadsData);
+        this.roadsLayer.clearLayers();
+        this.drawRoads(visibleRoads, true);
+
+        const visibleZones = this.filterFeaturesInView(bounds, this.zonesData);
+        this.zonesLayer.clearLayers();
+        this.drawZones(visibleZones, true);
+
+        this.renderAggregateBuildings(bounds);
+    }
+
+    renderHighDetail(bounds) {
+        const visibleRoads = this.filterFeaturesInView(bounds, this.roadsData);
+        this.roadsLayer.clearLayers();
+        this.drawRoads(visibleRoads, false);
+
+        const visibleZones = this.filterFeaturesInView(bounds, this.zonesData);
+        this.zonesLayer.clearLayers();
+        this.drawZones(visibleZones, false);
+
+        const visibleBuildings = this.filterFeaturesInView(bounds, this.buildingsData);
+        this.buildingsLayer.clearLayers();
+        this.drawBuildings(visibleBuildings, false);
+    }
+
+    renderAggregateBuildings(bounds) {
+        this.buildingsLayer.clearLayers();
+
+        const visibleBuildings = this.filterFeaturesInView(bounds, this.buildingsData);
+        if (visibleBuildings.length === 0) return;
+
+        const gridSize = 0.005;
+        const clusters = new Map();
+
+        visibleBuildings.forEach(b => {
+            if (!b.geom || !b.geom.coordinates) return;
+            const [lng, lat] = b.geom.coordinates;
+            const gx = Math.floor(lng / gridSize);
+            const gy = Math.floor(lat / gridSize);
+            const key = `${gx},${gy}`;
+            if (!clusters.has(key)) {
+                clusters.set(key, { count: 0, types: new Map(), sumLng: 0, sumLat: 0 });
+            }
+            const c = clusters.get(key);
+            c.count++;
+            c.sumLng += lng;
+            c.sumLat += lat;
+            const t = b.building_type || 'unknown';
+            c.types.set(t, (c.types.get(t) || 0) + 1);
+        });
+
+        clusters.forEach((c) => {
+            const center = [c.sumLat / c.count, c.sumLng / c.count];
+            const maxType = [...c.types.entries()].sort((a, b) => b[1] - a[1])[0];
+            const color = CONFIG.BUILDING_COLORS[maxType[0]] || CONFIG.BUILDING_COLORS.default;
+            const radius = Math.min(15, 4 + Math.sqrt(c.count) * 1.5);
+
+            L.circleMarker(center, {
+                renderer: this.canvasRenderer,
+                radius: radius,
+                fillColor: color,
+                color: '#fff',
+                weight: 1,
+                fillOpacity: 0.75
+            }).addTo(this.buildingsLayer).bindPopup(`
+                <h3>建筑集群</h3>
+                <p><strong>建筑数量:</strong> ${c.count}</p>
+                <p><strong>主要类型:</strong> ${maxType[0]}</p>
+                <p>缩放至更高等级查看详细</p>
+            `);
+        });
     }
 
     setupLayerControls() {
         document.getElementById('layerWalls').addEventListener('change', (e) => {
-            if (e.target.checked) {
-                this.map.addLayer(this.wallsLayer);
-            } else {
-                this.map.removeLayer(this.wallsLayer);
-            }
+            if (e.target.checked) this.map.addLayer(this.wallsLayer);
+            else this.map.removeLayer(this.wallsLayer);
         });
 
         document.getElementById('layerRoads').addEventListener('change', (e) => {
-            if (e.target.checked) {
-                this.map.addLayer(this.roadsLayer);
-            } else {
-                this.map.removeLayer(this.roadsLayer);
-            }
+            if (e.target.checked) this.map.addLayer(this.roadsLayer);
+            else this.map.removeLayer(this.roadsLayer);
         });
 
         document.getElementById('layerZones').addEventListener('change', (e) => {
-            if (e.target.checked) {
-                this.map.addLayer(this.zonesLayer);
-            } else {
-                this.map.removeLayer(this.zonesLayer);
-            }
+            if (e.target.checked) this.map.addLayer(this.zonesLayer);
+            else this.map.removeLayer(this.zonesLayer);
         });
 
         document.getElementById('layerBuildings').addEventListener('change', (e) => {
-            if (e.target.checked) {
-                this.map.addLayer(this.buildingsLayer);
-            } else {
-                this.map.removeLayer(this.buildingsLayer);
-            }
+            if (e.target.checked) this.map.addLayer(this.buildingsLayer);
+            else this.map.removeLayer(this.buildingsLayer);
         });
 
         document.querySelectorAll('.view-btn').forEach(btn => {
@@ -89,19 +253,11 @@ class CityMap {
 
     switchView(view) {
         this.currentView = view;
-        
+
         if (view === 'plan') {
             this.wallsLayer.eachLayer(l => l.setStyle ? l.setStyle({ opacity: 1 }) : null);
-            this.roadsLayer.eachLayer(l => {
-                if (l.setStyle) l.setStyle({ color: '#555', weight: 3, opacity: 0.8 });
-            });
-            this.zonesLayer.eachLayer(l => {
-                if (l.setStyle) l.setStyle({ fillOpacity: 0.5 });
-            });
-            this.buildingsLayer.eachLayer(l => {
-                if (l.setStyle) l.setStyle({ fillOpacity: 1 });
-            });
             this.syntaxLayer.clearLayers();
+            this.scheduleRender();
         } else if (view === 'syntax') {
             this.renderSyntaxView();
         } else if (view === 'fractal') {
@@ -112,35 +268,61 @@ class CityMap {
     loadSite(site) {
         this.currentSite = site;
         this.clearAllLayers();
+        this.loadingPromises.forEach(p => p.abort && p.abort());
+        this.loadingPromises.clear();
 
         if (!site) return;
 
         const center = [site.center_latitude, site.center_longitude];
-        this.map.setView(center, 14);
+        this.map.setView(center, 14, { animate: false });
+        this.lastRenderZoom = -1;
+        this.lastRenderBounds = null;
 
         if (site.geom) {
             this.drawWalls(site.geom);
         }
 
-        API.getRoads(site.id).then(roads => {
-            this.roadsData = roads;
-            this.drawRoads(roads);
-        }).catch(err => console.error('加载道路失败:', err));
+        this.fetchAndCache('roads_' + site.id,
+            () => API.getRoads(site.id),
+            (roads) => { this.roadsData = roads; this.scheduleRender(); },
+            (err) => console.error('加载道路失败:', err)
+        );
 
-        API.getFunctionalZones(site.id).then(zones => {
-            this.zonesData = zones;
-            this.drawZones(zones);
-            this.updateZoneLegend(zones);
-        }).catch(err => console.error('加载功能区失败:', err));
+        this.fetchAndCache('zones_' + site.id,
+            () => API.getFunctionalZones(site.id),
+            (zones) => {
+                this.zonesData = zones;
+                this.updateZoneLegend(zones);
+                this.scheduleRender();
+            },
+            (err) => console.error('加载功能区失败:', err)
+        );
 
-        API.getBuildings(site.id).then(buildings => {
-            this.buildingsData = buildings;
-            this.drawBuildings(buildings);
-        }).catch(err => console.error('加载建筑失败:', err));
+        this.fetchAndCache('buildings_' + site.id,
+            () => API.getBuildings(site.id),
+            (buildings) => { this.buildingsData = buildings; this.scheduleRender(); },
+            (err) => console.error('加载建筑失败:', err)
+        );
 
-        API.getRoadSyntax(site.id).then(syntax => {
-            this.roadSyntaxData = syntax;
-        }).catch(err => console.error('加载空间句法数据失败:', err));
+        this.fetchAndCache('syntax_' + site.id,
+            () => API.getRoadSyntax(site.id),
+            (syntax) => { this.roadSyntaxData = syntax; },
+            (err) => console.error('加载空间句法数据失败:', err)
+        );
+    }
+
+    fetchAndCache(key, fetchFn, onSuccess, onError) {
+        if (this.loadingPromises.has(key)) return;
+        let cancelled = false;
+        const promise = fetchFn();
+        this.loadingPromises.set(key, { abort: () => { cancelled = true; } });
+        promise.then(result => {
+            this.loadingPromises.delete(key);
+            if (!cancelled && onSuccess) onSuccess(result);
+        }).catch(err => {
+            this.loadingPromises.delete(key);
+            if (!cancelled && onError) onError(err);
+        });
     }
 
     clearAllLayers() {
@@ -155,6 +337,7 @@ class CityMap {
         if (!geom || !geom.coordinates) return;
 
         const polygon = L.geoJSON(geom, {
+            renderer: this.canvasRenderer,
             style: {
                 color: '#8b4513',
                 weight: 3,
@@ -164,97 +347,118 @@ class CityMap {
         }).addTo(this.wallsLayer);
     }
 
-    drawRoads(roads) {
+    drawRoads(roads, simplified = false) {
         roads.forEach(road => {
             if (!road.geom || !road.geom.coordinates) return;
 
             const coords = road.geom.coordinates.map(c => [c[1], c[0]]);
+            const weight = simplified
+                ? (road.width ? Math.min(4, Math.max(1, road.width / 5)) : 2)
+                : (road.width ? Math.min(8, Math.max(2, road.width / 3)) : 3);
+            const opacity = simplified ? 0.6 : 0.8;
+
             const polyline = L.polyline(coords, {
+                renderer: this.canvasRenderer,
                 color: '#555',
-                weight: road.width ? Math.min(8, Math.max(2, road.width / 3)) : 3,
-                opacity: 0.8
+                weight: weight,
+                opacity: opacity
             }).addTo(this.roadsLayer);
 
-            polyline.bindPopup(`
-                <h3>${road.road_name || '未命名道路'}</h3>
-                <p><strong>类型:</strong> ${road.road_type || '未知'}</p>
-                <p><strong>宽度:</strong> ${road.width ? road.width.toFixed(1) + ' 米' : '未知'}</p>
-                ${road.description ? `<p><strong>描述:</strong> ${road.description}</p>` : ''}
-            `);
+            if (!simplified) {
+                polyline.bindPopup(`
+                    <h3>${road.road_name || '未命名道路'}</h3>
+                    <p><strong>类型:</strong> ${road.road_type || '未知'}</p>
+                    <p><strong>宽度:</strong> ${road.width ? road.width.toFixed(1) + ' 米' : '未知'}</p>
+                    ${road.description ? `<p><strong>描述:</strong> ${road.description}</p>` : ''}
+                `);
+            }
         });
     }
 
-    drawZones(zones) {
+    drawZones(zones, simplified = false) {
         zones.forEach(zone => {
             if (!zone.geom || !zone.geom.coordinates) return;
 
             const color = CONFIG.ZONE_COLORS[zone.zone_type] || CONFIG.ZONE_COLORS.default;
-            
+            const fillOpacity = simplified ? 0.3 : 0.5;
+            const weight = simplified ? 1 : 2;
+
             const polygon = L.geoJSON(zone.geom, {
+                renderer: this.canvasRenderer,
                 style: {
                     color: color,
-                    weight: 2,
+                    weight: weight,
                     fillColor: color,
-                    fillOpacity: 0.5
+                    fillOpacity: fillOpacity
                 }
             }).addTo(this.zonesLayer);
 
             polygon.on('click', () => {
-                if (this.onZoneClick) {
-                    this.onZoneClick(zone);
-                }
+                if (this.onZoneClick) this.onZoneClick(zone);
             });
 
-            polygon.bindTooltip(zone.name || zone.zone_type, {
-                permanent: false,
-                direction: 'center'
-            });
+            if (!simplified) {
+                polygon.bindTooltip(zone.name || zone.zone_type, {
+                    permanent: false,
+                    direction: 'center'
+                });
+            }
         });
     }
 
-    drawBuildings(buildings) {
+    drawBuildings(buildings, simplified = false) {
         buildings.forEach(building => {
             if (!building.geom || !building.geom.coordinates) return;
 
             const coords = [building.geom.coordinates[1], building.geom.coordinates[0]];
             const color = CONFIG.BUILDING_COLORS[building.building_type] || CONFIG.BUILDING_COLORS.default;
+            const radius = simplified
+                ? Math.min(6, Math.max(2, 3))
+                : (building.area_sq_m ? Math.min(12, Math.max(3, Math.sqrt(building.area_sq_m) / 5)) : 5);
+            const weight = simplified ? 0.5 : 1.5;
 
             const marker = L.circleMarker(coords, {
-                radius: building.area_sq_m ? Math.min(12, Math.max(3, Math.sqrt(building.area_sq_m) / 5)) : 5,
+                renderer: this.canvasRenderer,
+                radius: radius,
                 fillColor: color,
                 color: '#fff',
-                weight: 1.5,
+                weight: weight,
                 fillOpacity: 1
             }).addTo(this.buildingsLayer);
 
             marker.on('click', () => {
-                if (this.onBuildingClick) {
-                    this.onBuildingClick(building);
-                }
+                if (this.onBuildingClick) this.onBuildingClick(building);
             });
 
-            marker.bindPopup(`
-                <h3>${building.name || building.building_type}</h3>
-                <p><strong>类型:</strong> ${building.building_type || '未知'}</p>
-                <p><strong>面积:</strong> ${building.area_sq_m ? building.area_sq_m.toFixed(1) + ' 平方米' : '未知'}</p>
-                <p><strong>房间数:</strong> ${building.rooms_count || '未知'}</p>
-            `);
+            if (!simplified) {
+                marker.bindPopup(`
+                    <h3>${building.name || building.building_type}</h3>
+                    <p><strong>类型:</strong> ${building.building_type || '未知'}</p>
+                    <p><strong>面积:</strong> ${building.area_sq_m ? building.area_sq_m.toFixed(1) + ' 平方米' : '未知'}</p>
+                    <p><strong>房间数:</strong> ${building.rooms_count || '未知'}</p>
+                `);
+            }
         });
     }
 
     renderSyntaxView() {
         this.syntaxLayer.clearLayers();
-        
-        if (this.roadsData.length === 0 || this.roadSyntaxData.length === 0) {
-            return;
-        }
+
+        if (this.roadsData.length === 0 || this.roadSyntaxData.length === 0) return;
+
+        const bounds = this.map.getBounds();
+        const zoom = this.map.getZoom();
+        const visibleRoads = this.filterFeaturesInView(bounds, this.roadsData);
 
         const integrations = this.roadSyntaxData.map(r => r.integration).filter(v => v !== null && v !== undefined);
         const minInt = Math.min(...integrations);
         const maxInt = Math.max(...integrations);
         const range = maxInt - minInt || 1;
 
-        this.roadSyntaxData.forEach(syntax => {
+        const visibleIds = new Set(visibleRoads.map(r => r.id));
+        const visibleSyntax = this.roadSyntaxData.filter(s => visibleIds.has(s.road_id));
+
+        visibleSyntax.forEach(syntax => {
             const road = this.roadsData.find(r => r.id === syntax.road_id);
             if (!road || !road.geom || !road.geom.coordinates) return;
 
@@ -264,8 +468,9 @@ class CityMap {
 
             const coords = road.geom.coordinates.map(c => [c[1], c[0]]);
             const polyline = L.polyline(coords, {
+                renderer: this.canvasRenderer,
                 color: color,
-                weight: 5,
+                weight: zoom >= 14 ? 5 : 3,
                 opacity: 0.9
             }).addTo(this.syntaxLayer);
 
@@ -278,19 +483,13 @@ class CityMap {
             `);
         });
 
-        this.zonesLayer.eachLayer(l => {
-            if (l.setStyle) l.setStyle({ fillOpacity: 0.2 });
-        });
-        this.buildingsLayer.eachLayer(l => {
-            if (l.setStyle) l.setStyle({ fillOpacity: 0.5 });
-        });
+        this.zonesLayer.eachLayer(l => { if (l.setStyle) l.setStyle({ fillOpacity: 0.2 }); });
+        this.buildingsLayer.eachLayer(l => { if (l.setStyle) l.setStyle({ fillOpacity: 0.5 }); });
     }
 
     renderFractalView() {
         this.syntaxLayer.clearLayers();
-        
         if (!this.currentSite || !this.currentSite.geom) return;
-
         this.drawFractalGrid();
     }
 
@@ -301,13 +500,12 @@ class CityMap {
         const bounds = this.getGeoJSONBounds(geom);
         if (!bounds) return;
 
-        const center = this.map.getCenter();
         const zoom = this.map.getZoom();
-        
-        const levels = [1, 2, 4, 8, 16];
+        const levels = zoom >= 14 ? [1, 2, 4, 8, 16] : [1, 2, 4, 8];
         const colors = ['#ff0000', '#ff6600', '#ffcc00', '#66ff00', '#00ccff'];
-        
+
         levels.forEach((level, idx) => {
+            if (idx >= colors.length) return;
             const cellSize = (bounds.maxX - bounds.minX) / level;
             for (let i = 0; i < level; i++) {
                 for (let j = 0; j < level; j++) {
@@ -315,8 +513,9 @@ class CityMap {
                     const y1 = bounds.minY + j * cellSize;
                     const x2 = x1 + cellSize;
                     const y2 = y1 + cellSize;
-                    
+
                     const rect = L.rectangle([[y1, x1], [y2, x2]], {
+                        renderer: this.canvasRenderer,
                         color: colors[idx],
                         weight: 1,
                         fill: false,
@@ -345,13 +544,14 @@ class CityMap {
         };
 
         traverse(geom.coordinates);
+        if (!isFinite(minX)) return null;
         return { minX, maxX, minY, maxY };
     }
 
     updateZoneLegend(zones) {
         const legend = document.getElementById('zoneLegend');
         const types = new Set(zones.map(z => z.zone_type));
-        
+
         legend.innerHTML = '';
         types.forEach(type => {
             const color = CONFIG.ZONE_COLORS[type] || CONFIG.ZONE_COLORS.default;
