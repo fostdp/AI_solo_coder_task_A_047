@@ -1,4 +1,4 @@
-class MorphologyAnalyzer {
+class MorphologyPanel {
     constructor() {
         this.currentSiteId = null;
         this.currentResult = null;

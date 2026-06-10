@@ -51,5 +51,20 @@ const CONFIG = {
         'intersection_density': '交叉口密度',
         'functional_diversity': '功能多样性',
         'functional_mixing': '功能混合度'
+    },
+
+    RENDER: {
+        CANVAS_PADDING: 0.5,
+        LOD_ZOOM_OVERVIEW: 11,
+        LOD_ZOOM_LOW: 13,
+        LOD_ZOOM_MEDIUM: 15,
+        THROTTLE_MS: 150,
+        BUILDING_AGGREGATION_GRID: 0.005,
+        MAP_CENTER: [34.0, 108.0],
+        MAP_DEFAULT_ZOOM: 12,
+        MAP_MIN_ZOOM: 8,
+        MAP_MAX_ZOOM: 18,
+        FRACTAL_GRID_LEVELS_HIGH: [1, 2, 4, 8, 16],
+        FRACTAL_GRID_LEVELS_LOW: [1, 2, 4, 8]
     }
 };

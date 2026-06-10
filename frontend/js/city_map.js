@@ -22,13 +22,14 @@ class CityMap {
     }
 
     init() {
-        this.canvasRenderer = L.canvas({ padding: 0.5 });
+        const R = CONFIG.RENDER;
+        this.canvasRenderer = L.canvas({ padding: R.CANVAS_PADDING });
 
         this.map = L.map('map', {
-            center: [34.0, 108.0],
-            zoom: 12,
-            minZoom: 8,
-            maxZoom: 18,
+            center: R.MAP_CENTER,
+            zoom: R.MAP_DEFAULT_ZOOM,
+            minZoom: R.MAP_MIN_ZOOM,
+            maxZoom: R.MAP_MAX_ZOOM,
             preferCanvas: true,
             renderer: this.canvasRenderer
         });
@@ -49,6 +50,7 @@ class CityMap {
     }
 
     setupPerformanceEvents() {
+        const R = CONFIG.RENDER;
         this.map.on('movestart', () => {
             if (this.renderFrame) {
                 cancelAnimationFrame(this.renderFrame);
@@ -58,7 +60,7 @@ class CityMap {
 
         this.map.on('moveend zoomend', L.Util.throttle(() => {
             this.scheduleRender();
-        }, 150, this));
+        }, R.THROTTLE_MS, this));
     }
 
     scheduleRender() {
@@ -70,9 +72,10 @@ class CityMap {
     }
 
     getRenderLevel(zoom) {
-        if (zoom < 11) return 'overview';
-        if (zoom < 13) return 'low';
-        if (zoom < 15) return 'medium';
+        const R = CONFIG.RENDER;
+        if (zoom < R.LOD_ZOOM_OVERVIEW) return 'overview';
+        if (zoom < R.LOD_ZOOM_LOW) return 'low';
+        if (zoom < R.LOD_ZOOM_MEDIUM) return 'medium';
         return 'high';
     }
 
@@ -179,7 +182,7 @@ class CityMap {
         const visibleBuildings = this.filterFeaturesInView(bounds, this.buildingsData);
         if (visibleBuildings.length === 0) return;
 
-        const gridSize = 0.005;
+        const gridSize = CONFIG.RENDER.BUILDING_AGGREGATION_GRID;
         const clusters = new Map();
 
         visibleBuildings.forEach(b => {
@@ -500,8 +503,9 @@ class CityMap {
         const bounds = this.getGeoJSONBounds(geom);
         if (!bounds) return;
 
+        const R = CONFIG.RENDER;
         const zoom = this.map.getZoom();
-        const levels = zoom >= 14 ? [1, 2, 4, 8, 16] : [1, 2, 4, 8];
+        const levels = zoom >= 14 ? R.FRACTAL_GRID_LEVELS_HIGH : R.FRACTAL_GRID_LEVELS_LOW;
         const colors = ['#ff0000', '#ff6600', '#ffcc00', '#66ff00', '#00ccff'];
 
         levels.forEach((level, idx) => {

@@ -2,7 +2,7 @@ class App {
     constructor() {
         this.cityMap = new CityMap();
         this.timeline = new Timeline();
-        this.morphologyAnalyzer = new MorphologyAnalyzer();
+        this.morphologyPanel = new MorphologyPanel();
         this.trendAnalyzer = new TrendAnalyzer();
         this.compareModal = new CompareModal();
         
@@ -13,7 +13,7 @@ class App {
 
     async init() {
         this.cityMap.init();
-        this.morphologyAnalyzer.init();
+        this.morphologyPanel.init();
         this.trendAnalyzer.init();
 
         this.cityMap.setOnZoneClick((zone) => this.showZoneDetail(zone));
@@ -89,7 +89,7 @@ class App {
             this.cityMap.loadSite(null);
             this.currentSite = null;
             this.updateSiteInfo(null);
-            this.morphologyAnalyzer.setSite(null);
+            this.morphologyPanel.setSite(null);
         }
     }
 
@@ -104,7 +104,7 @@ class App {
         
         this.cityMap.loadSite(site);
         this.updateSiteInfo(site);
-        this.morphologyAnalyzer.setSite(site.id);
+        this.morphologyPanel.setSite(site.id);
         
         this.clearDetailPanels();
     }

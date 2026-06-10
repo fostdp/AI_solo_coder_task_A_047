@@ -42,25 +42,28 @@ impl FractalResult {
 pub fn boundary_fractal_dimension_robust(
     polygon_points: &[(f64, f64)],
     num_scales: usize,
+    quality_threshold: f64,
+    bootstrap_samples_min: usize,
+    bootstrap_samples_max: usize,
 ) -> MultiFractalResult {
     let data_quality = assess_data_quality(polygon_points);
     
-    let box_counting = box_counting_dimension(polygon_points, num_scales, data_quality);
+    let box_counting = box_counting_dimension(polygon_points, num_scales, data_quality, bootstrap_samples_min, bootstrap_samples_max);
     let perimeter_area = perimeter_area_dimension(polygon_points);
-    let divider = divider_dimension(polygon_points, num_scales);
+    let divider = divider_dimension(polygon_points, num_scales, bootstrap_samples_min, bootstrap_samples_max);
 
     let mut valid_dims = Vec::new();
     let mut weights = Vec::new();
 
-    if box_counting.data_quality > 0.3 {
+    if box_counting.data_quality > quality_threshold {
         valid_dims.push(box_counting.dimension);
         weights.push(box_counting.data_quality * box_counting.r_squared);
     }
-    if perimeter_area.data_quality > 0.3 {
+    if perimeter_area.data_quality > quality_threshold {
         valid_dims.push(perimeter_area.dimension);
         weights.push(perimeter_area.data_quality * perimeter_area.r_squared);
     }
-    if divider.data_quality > 0.3 {
+    if divider.data_quality > quality_threshold {
         valid_dims.push(divider.dimension);
         weights.push(divider.data_quality * divider.r_squared);
     }
@@ -105,6 +108,9 @@ pub fn boundary_fractal_dimension_robust(
 pub fn network_fractal_dimension_robust(
     line_segments: &[((f64, f64), (f64, f64))],
     num_scales: usize,
+    quality_threshold: f64,
+    bootstrap_samples_min: usize,
+    bootstrap_samples_max: usize,
 ) -> MultiFractalResult {
     let data_quality = if line_segments.is_empty() {
         0.0
@@ -112,18 +118,18 @@ pub fn network_fractal_dimension_robust(
         (line_segments.len() as f64 / 20.0).min(1.0)
     };
 
-    let box_counting = network_box_counting_dimension(line_segments, num_scales, data_quality);
+    let box_counting = network_box_counting_dimension(line_segments, num_scales, data_quality, bootstrap_samples_min, bootstrap_samples_max);
     let perimeter_area = FractalResult::invalid("perimeter_area");
-    let divider = network_divider_dimension(line_segments, num_scales);
+    let divider = network_divider_dimension(line_segments, num_scales, bootstrap_samples_min, bootstrap_samples_max);
 
     let mut valid_dims = Vec::new();
     let mut weights = Vec::new();
 
-    if box_counting.data_quality > 0.3 {
+    if box_counting.data_quality > quality_threshold {
         valid_dims.push(box_counting.dimension);
         weights.push(box_counting.data_quality * box_counting.r_squared);
     }
-    if divider.data_quality > 0.3 {
+    if divider.data_quality > quality_threshold {
         valid_dims.push(divider.dimension);
         weights.push(divider.data_quality * divider.r_squared);
     }
@@ -226,6 +232,8 @@ fn box_counting_dimension(
     polygon_points: &[(f64, f64)],
     num_scales: usize,
     data_quality: f64,
+    bootstrap_samples_min: usize,
+    bootstrap_samples_max: usize,
 ) -> FractalResult {
     if polygon_points.len() < 3 {
         return FractalResult::invalid("box_counting");
@@ -261,7 +269,7 @@ fn box_counting_dimension(
         return res;
     }
 
-    let (slope, r_squared, ci_lower, ci_upper) = robust_linear_regression(&log_scales, &log_counts);
+    let (slope, r_squared, ci_lower, ci_upper) = robust_linear_regression(&log_scales, &log_counts, bootstrap_samples_min, bootstrap_samples_max);
 
     FractalResult {
         dimension: slope.abs(),
@@ -279,6 +287,8 @@ fn network_box_counting_dimension(
     segments: &[((f64, f64), (f64, f64))],
     num_scales: usize,
     data_quality: f64,
+    bootstrap_samples_min: usize,
+    bootstrap_samples_max: usize,
 ) -> FractalResult {
     if segments.is_empty() {
         return FractalResult::invalid("box_counting");
@@ -314,7 +324,7 @@ fn network_box_counting_dimension(
         return res;
     }
 
-    let (slope, r_squared, ci_lower, ci_upper) = robust_linear_regression(&log_scales, &log_counts);
+    let (slope, r_squared, ci_lower, ci_upper) = robust_linear_regression(&log_scales, &log_counts, bootstrap_samples_min, bootstrap_samples_max);
 
     FractalResult {
         dimension: slope.abs(),
@@ -371,7 +381,7 @@ fn perimeter_area_dimension(points: &[(f64, f64)]) -> FractalResult {
     }
 }
 
-fn divider_dimension(points: &[(f64, f64)], num_scales: usize) -> FractalResult {
+fn divider_dimension(points: &[(f64, f64)], num_scales: usize, bootstrap_samples_min: usize, bootstrap_samples_max: usize) -> FractalResult {
     if points.len() < 4 {
         return FractalResult::invalid("divider");
     }
@@ -413,7 +423,7 @@ fn divider_dimension(points: &[(f64, f64)], num_scales: usize) -> FractalResult 
         return res;
     }
 
-    let (slope, r_squared, ci_lower, ci_upper) = robust_linear_regression(&log_steps, &log_lengths);
+    let (slope, r_squared, ci_lower, ci_upper) = robust_linear_regression(&log_steps, &log_lengths, bootstrap_samples_min, bootstrap_samples_max);
     let dimension = 1.0 - slope;
 
     FractalResult {
@@ -431,6 +441,8 @@ fn divider_dimension(points: &[(f64, f64)], num_scales: usize) -> FractalResult 
 fn network_divider_dimension(
     segments: &[((f64, f64), (f64, f64))],
     num_scales: usize,
+    bootstrap_samples_min: usize,
+    bootstrap_samples_max: usize,
 ) -> FractalResult {
     if segments.len() < 3 {
         return FractalResult::invalid("divider");
@@ -476,7 +488,7 @@ fn network_divider_dimension(
         return res;
     }
 
-    let (slope, r_squared, ci_lower, ci_upper) = robust_linear_regression(&log_steps, &log_counts);
+    let (slope, r_squared, ci_lower, ci_upper) = robust_linear_regression(&log_steps, &log_counts, bootstrap_samples_min, bootstrap_samples_max);
 
     FractalResult {
         dimension: (1.0 - slope).clamp(1.0, 2.0),
@@ -544,6 +556,8 @@ fn divider_walk(points: &[(f64, f64)], step_size: f64) -> (f64, usize) {
 fn robust_linear_regression(
     x: &[f64],
     y: &[f64],
+    bootstrap_samples_min: usize,
+    bootstrap_samples_max: usize,
 ) -> (f64, f64, f64, f64) {
     let n = x.len();
     if n < 3 {
@@ -553,7 +567,7 @@ fn robust_linear_regression(
     let (base_slope, _intercept, base_r2) = ordinary_least_squares(x, y);
 
     let mut rng = thread_rng();
-    let num_bootstrap = if n < 10 { 100 } else { 500 };
+    let num_bootstrap = if n < 10 { bootstrap_samples_min } else { bootstrap_samples_max };
     let mut slopes = Vec::with_capacity(num_bootstrap);
 
     for _ in 0..num_bootstrap {
