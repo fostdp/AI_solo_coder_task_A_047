@@ -1,337 +1,375 @@
-const MapManager = {
-    map: null,
-    canvas: null,
-    ctx: null,
-    wells: [],
-    relations: [],
-    suggestions: [],
-    selectedWell: null,
-    layerVisibility: {
-        injection: true,
-        production: true,
-        relations: true,
-        allocation: true
-    },
-    currentBlock: 'ALL',
+class CityMap {
+    constructor() {
+        this.map = null;
+        this.currentSite = null;
+        this.wallsLayer = null;
+        this.roadsLayer = null;
+        this.zonesLayer = null;
+        this.buildingsLayer = null;
+        this.syntaxLayer = null;
+        this.canvasLayer = null;
+        this.currentView = 'plan';
+        this.zonesData = [];
+        this.roadsData = [];
+        this.buildingsData = [];
+        this.roadSyntaxData = [];
+        this.onZoneClick = null;
+        this.onBuildingClick = null;
+    }
 
     init() {
         this.map = L.map('map', {
-            center: CONFIG.MAP_CENTER,
-            zoom: CONFIG.MAP_ZOOM,
-            zoomControl: true,
-            attributionControl: true
+            center: [34.0, 108.0],
+            zoom: 12,
+            minZoom: 8,
+            maxZoom: 18
         });
 
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '© OpenStreetMap contributors',
-            maxZoom: 18
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+            maxZoom: 19
         }).addTo(this.map);
 
-        this.canvas = document.getElementById('well-canvas');
-        this.ctx = this.canvas.getContext('2d');
+        this.wallsLayer = L.layerGroup().addTo(this.map);
+        this.roadsLayer = L.layerGroup().addTo(this.map);
+        this.zonesLayer = L.layerGroup().addTo(this.map);
+        this.buildingsLayer = L.layerGroup().addTo(this.map);
+        this.syntaxLayer = L.layerGroup().addTo(this.map);
 
-        this.resizeCanvas();
-        window.addEventListener('resize', () => this.resizeCanvas());
+        this.setupCanvasLayer();
+        this.setupLayerControls();
+    }
 
-        this.map.on('moveend', () => this.render());
-        this.map.on('zoomend', () => this.render());
-        this.map.on('resize', () => this.resizeCanvas());
+    setupCanvasLayer() {
+        const canvas = L.canvas();
+        this.canvasLayer = canvas;
+    }
 
-        this.setupCanvasInteraction();
+    setupLayerControls() {
+        document.getElementById('layerWalls').addEventListener('change', (e) => {
+            if (e.target.checked) {
+                this.map.addLayer(this.wallsLayer);
+            } else {
+                this.map.removeLayer(this.wallsLayer);
+            }
+        });
 
-        this.render();
-    },
+        document.getElementById('layerRoads').addEventListener('change', (e) => {
+            if (e.target.checked) {
+                this.map.addLayer(this.roadsLayer);
+            } else {
+                this.map.removeLayer(this.roadsLayer);
+            }
+        });
 
-    resizeCanvas() {
-        const container = document.querySelector('.map-container');
-        this.canvas.width = container.clientWidth;
-        this.canvas.height = container.clientHeight;
-        this.render();
-    },
+        document.getElementById('layerZones').addEventListener('change', (e) => {
+            if (e.target.checked) {
+                this.map.addLayer(this.zonesLayer);
+            } else {
+                this.map.removeLayer(this.zonesLayer);
+            }
+        });
 
-    setupCanvasInteraction() {
-        const mapContainer = document.getElementById('map');
+        document.getElementById('layerBuildings').addEventListener('change', (e) => {
+            if (e.target.checked) {
+                this.map.addLayer(this.buildingsLayer);
+            } else {
+                this.map.removeLayer(this.buildingsLayer);
+            }
+        });
+
+        document.querySelectorAll('.view-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+                e.target.classList.add('active');
+                this.switchView(e.target.dataset.view);
+            });
+        });
+    }
+
+    switchView(view) {
+        this.currentView = view;
         
-        mapContainer.addEventListener('click', (e) => {
-            const rect = this.canvas.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
-            
-            const clickedWell = this.findWellAtPosition(x, y);
-            if (clickedWell) {
-                this.selectWell(clickedWell);
-            }
-        });
-
-        mapContainer.addEventListener('mousemove', (e) => {
-            const rect = this.canvas.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
-            
-            const hoveredWell = this.findWellAtPosition(x, y);
-            this.showTooltip(hoveredWell, e.clientX, e.clientY);
-            
-            mapContainer.style.cursor = hoveredWell ? 'pointer' : 'grab';
-        });
-
-        mapContainer.addEventListener('mouseleave', () => {
-            this.hideTooltip();
-        });
-    },
-
-    findWellAtPosition(x, y) {
-        for (let i = this.wells.length - 1; i >= 0; i--) {
-            const well = this.wells[i];
-            const point = this.map.latLngToContainerPoint([well.latitude, well.longitude]);
-            
-            const dx = x - point.x;
-            const dy = y - point.y;
-            const distance = Math.sqrt(dx * dx + dy * dy);
-            
-            if (distance <= CONFIG.WELL_RADIUS + 4) {
-                return well;
-            }
+        if (view === 'plan') {
+            this.wallsLayer.eachLayer(l => l.setStyle ? l.setStyle({ opacity: 1 }) : null);
+            this.roadsLayer.eachLayer(l => {
+                if (l.setStyle) l.setStyle({ color: '#555', weight: 3, opacity: 0.8 });
+            });
+            this.zonesLayer.eachLayer(l => {
+                if (l.setStyle) l.setStyle({ fillOpacity: 0.5 });
+            });
+            this.buildingsLayer.eachLayer(l => {
+                if (l.setStyle) l.setStyle({ fillOpacity: 1 });
+            });
+            this.syntaxLayer.clearLayers();
+        } else if (view === 'syntax') {
+            this.renderSyntaxView();
+        } else if (view === 'fractal') {
+            this.renderFractalView();
         }
-        return null;
-    },
+    }
 
-    selectWell(well) {
-        this.selectedWell = well;
-        showWellDetail(well);
-        this.render();
-    },
+    loadSite(site) {
+        this.currentSite = site;
+        this.clearAllLayers();
 
-    showTooltip(well, clientX, clientY) {
-        let tooltip = document.getElementById('well-tooltip');
+        if (!site) return;
+
+        const center = [site.center_latitude, site.center_longitude];
+        this.map.setView(center, 14);
+
+        if (site.geom) {
+            this.drawWalls(site.geom);
+        }
+
+        API.getRoads(site.id).then(roads => {
+            this.roadsData = roads;
+            this.drawRoads(roads);
+        }).catch(err => console.error('加载道路失败:', err));
+
+        API.getFunctionalZones(site.id).then(zones => {
+            this.zonesData = zones;
+            this.drawZones(zones);
+            this.updateZoneLegend(zones);
+        }).catch(err => console.error('加载功能区失败:', err));
+
+        API.getBuildings(site.id).then(buildings => {
+            this.buildingsData = buildings;
+            this.drawBuildings(buildings);
+        }).catch(err => console.error('加载建筑失败:', err));
+
+        API.getRoadSyntax(site.id).then(syntax => {
+            this.roadSyntaxData = syntax;
+        }).catch(err => console.error('加载空间句法数据失败:', err));
+    }
+
+    clearAllLayers() {
+        this.wallsLayer.clearLayers();
+        this.roadsLayer.clearLayers();
+        this.zonesLayer.clearLayers();
+        this.buildingsLayer.clearLayers();
+        this.syntaxLayer.clearLayers();
+    }
+
+    drawWalls(geom) {
+        if (!geom || !geom.coordinates) return;
+
+        const polygon = L.geoJSON(geom, {
+            style: {
+                color: '#8b4513',
+                weight: 3,
+                fillColor: '#deb887',
+                fillOpacity: 0.2
+            }
+        }).addTo(this.wallsLayer);
+    }
+
+    drawRoads(roads) {
+        roads.forEach(road => {
+            if (!road.geom || !road.geom.coordinates) return;
+
+            const coords = road.geom.coordinates.map(c => [c[1], c[0]]);
+            const polyline = L.polyline(coords, {
+                color: '#555',
+                weight: road.width ? Math.min(8, Math.max(2, road.width / 3)) : 3,
+                opacity: 0.8
+            }).addTo(this.roadsLayer);
+
+            polyline.bindPopup(`
+                <h3>${road.road_name || '未命名道路'}</h3>
+                <p><strong>类型:</strong> ${road.road_type || '未知'}</p>
+                <p><strong>宽度:</strong> ${road.width ? road.width.toFixed(1) + ' 米' : '未知'}</p>
+                ${road.description ? `<p><strong>描述:</strong> ${road.description}</p>` : ''}
+            `);
+        });
+    }
+
+    drawZones(zones) {
+        zones.forEach(zone => {
+            if (!zone.geom || !zone.geom.coordinates) return;
+
+            const color = CONFIG.ZONE_COLORS[zone.zone_type] || CONFIG.ZONE_COLORS.default;
+            
+            const polygon = L.geoJSON(zone.geom, {
+                style: {
+                    color: color,
+                    weight: 2,
+                    fillColor: color,
+                    fillOpacity: 0.5
+                }
+            }).addTo(this.zonesLayer);
+
+            polygon.on('click', () => {
+                if (this.onZoneClick) {
+                    this.onZoneClick(zone);
+                }
+            });
+
+            polygon.bindTooltip(zone.name || zone.zone_type, {
+                permanent: false,
+                direction: 'center'
+            });
+        });
+    }
+
+    drawBuildings(buildings) {
+        buildings.forEach(building => {
+            if (!building.geom || !building.geom.coordinates) return;
+
+            const coords = [building.geom.coordinates[1], building.geom.coordinates[0]];
+            const color = CONFIG.BUILDING_COLORS[building.building_type] || CONFIG.BUILDING_COLORS.default;
+
+            const marker = L.circleMarker(coords, {
+                radius: building.area_sq_m ? Math.min(12, Math.max(3, Math.sqrt(building.area_sq_m) / 5)) : 5,
+                fillColor: color,
+                color: '#fff',
+                weight: 1.5,
+                fillOpacity: 1
+            }).addTo(this.buildingsLayer);
+
+            marker.on('click', () => {
+                if (this.onBuildingClick) {
+                    this.onBuildingClick(building);
+                }
+            });
+
+            marker.bindPopup(`
+                <h3>${building.name || building.building_type}</h3>
+                <p><strong>类型:</strong> ${building.building_type || '未知'}</p>
+                <p><strong>面积:</strong> ${building.area_sq_m ? building.area_sq_m.toFixed(1) + ' 平方米' : '未知'}</p>
+                <p><strong>房间数:</strong> ${building.rooms_count || '未知'}</p>
+            `);
+        });
+    }
+
+    renderSyntaxView() {
+        this.syntaxLayer.clearLayers();
         
-        if (!well) {
-            this.hideTooltip();
+        if (this.roadsData.length === 0 || this.roadSyntaxData.length === 0) {
             return;
         }
 
-        if (!tooltip) {
-            tooltip = document.createElement('div');
-            tooltip.id = 'well-tooltip';
-            tooltip.className = 'tooltip';
-            document.body.appendChild(tooltip);
-        }
+        const integrations = this.roadSyntaxData.map(r => r.integration).filter(v => v !== null && v !== undefined);
+        const minInt = Math.min(...integrations);
+        const maxInt = Math.max(...integrations);
+        const range = maxInt - minInt || 1;
 
-        let content = `<div class="tooltip-title">${well.wellName}</div>`;
-        content += `<div class="tooltip-row"><span class="tooltip-label">类型:</span><span class="tooltip-value">${well.wellType === 'INJECTION' ? '注水井' : '采油井'}</span></div>`;
-        content += `<div class="tooltip-row"><span class="tooltip-label">区块:</span><span class="tooltip-value">${well.blockName}</span></div>`;
+        this.roadSyntaxData.forEach(syntax => {
+            const road = this.roadsData.find(r => r.id === syntax.road_id);
+            if (!road || !road.geom || !road.geom.coordinates) return;
 
-        if (well.wellType === 'INJECTION') {
-            content += `<div class="tooltip-row"><span class="tooltip-label">日注水量:</span><span class="tooltip-value">${well.latestWaterVolume?.toFixed(2) || '--'} m³</span></div>`;
-            content += `<div class="tooltip-row"><span class="tooltip-label">注水压力:</span><span class="tooltip-value">${well.latestInjectionPressure?.toFixed(2) || '--'} MPa</span></div>`;
-        } else {
-            content += `<div class="tooltip-row"><span class="tooltip-label">日产油量:</span><span class="tooltip-value">${well.latestOilVolume?.toFixed(2) || '--'} t</span></div>`;
-            content += `<div class="tooltip-row"><span class="tooltip-label">含水率:</span><span class="tooltip-value">${well.latestWaterCut?.toFixed(2) || '--'}%</span></div>`;
-        }
+            const normalizedValue = (syntax.integration - minInt) / range;
+            const colorIndex = Math.floor(normalizedValue * (CONFIG.SYNTAX_COLOR_SCALE.length - 1));
+            const color = CONFIG.SYNTAX_COLOR_SCALE[Math.max(0, Math.min(CONFIG.SYNTAX_COLOR_SCALE.length - 1, colorIndex))];
 
-        tooltip.innerHTML = content;
-        tooltip.style.left = (clientX + 15) + 'px';
-        tooltip.style.top = (clientY + 15) + 'px';
-        tooltip.style.display = 'block';
-    },
+            const coords = road.geom.coordinates.map(c => [c[1], c[0]]);
+            const polyline = L.polyline(coords, {
+                color: color,
+                weight: 5,
+                opacity: 0.9
+            }).addTo(this.syntaxLayer);
 
-    hideTooltip() {
-        const tooltip = document.getElementById('well-tooltip');
-        if (tooltip) {
-            tooltip.style.display = 'none';
-        }
-    },
+            polyline.bindPopup(`
+                <h3>${road.road_name || '道路'}</h3>
+                <p><strong>整合度:</strong> ${syntax.integration ? syntax.integration.toFixed(4) : 'N/A'}</p>
+                <p><strong>选择度:</strong> ${syntax.choice ? syntax.choice.toFixed(2) : 'N/A'}</p>
+                <p><strong>深度:</strong> ${syntax.depth ? syntax.depth.toFixed(2) : 'N/A'}</p>
+                <p><strong>连接度:</strong> ${syntax.connectivity || 'N/A'}</p>
+            `);
+        });
 
-    async loadData() {
-        try {
-            const [wells, relations, suggestions] = await Promise.all([
-                API.getWells(null, this.currentBlock),
-                API.getRelations(this.currentBlock),
-                API.getLatestSuggestions()
-            ]);
-
-            this.wells = wells;
-            this.relations = relations.lines || [];
-            this.suggestions = suggestions.suggestions || [];
-
-            this.render();
-        } catch (error) {
-            console.error('Failed to load map data:', error);
-        }
-    },
-
-    setBlock(blockName) {
-        this.currentBlock = blockName;
-        this.loadData();
-    },
-
-    setLayerVisibility(layer, visible) {
-        this.layerVisibility[layer] = visible;
-        this.render();
-    },
-
-    render() {
-        if (!this.ctx || !this.map) return;
-
-        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-
-        if (this.layerVisibility.relations) {
-            this.renderRelations();
-        }
-
-        if (this.layerVisibility.allocation) {
-            this.renderAllocationArrows();
-        }
-
-        if (this.layerVisibility.injection) {
-            this.renderWells('INJECTION');
-        }
-
-        if (this.layerVisibility.production) {
-            this.renderWells('PRODUCTION');
-        }
-    },
-
-    renderRelations() {
-        this.ctx.lineWidth = 2;
-        this.ctx.globalAlpha = 0.6;
-
-        for (const relation of this.relations) {
-            const coords = relation.coordinates;
-            if (!coords || coords.length < 2) continue;
-
-            const start = this.map.latLngToContainerPoint([coords[0][1], coords[0][0]]);
-            const end = this.map.latLngToContainerPoint([coords[1][1], coords[1][0]]);
-
-            this.ctx.beginPath();
-            this.ctx.moveTo(start.x, start.y);
-            this.ctx.lineTo(end.x, end.y);
-            this.ctx.strokeStyle = relation.color || '#888';
-            this.ctx.stroke();
-
-            this.drawArrowHead(start, end, relation.color);
-        }
-
-        this.ctx.globalAlpha = 1;
-    },
-
-    drawArrowHead(start, end, color) {
-        const headLength = 8;
-        const angle = Math.atan2(end.y - start.y, end.x - start.x);
-
-        this.ctx.beginPath();
-        this.ctx.moveTo(end.x, end.y);
-        this.ctx.lineTo(
-            end.x - headLength * Math.cos(angle - Math.PI / 6),
-            end.y - headLength * Math.sin(angle - Math.PI / 6)
-        );
-        this.ctx.moveTo(end.x, end.y);
-        this.ctx.lineTo(
-            end.x - headLength * Math.cos(angle + Math.PI / 6),
-            end.y - headLength * Math.sin(angle + Math.PI / 6)
-        );
-        this.ctx.strokeStyle = color;
-        this.ctx.stroke();
-    },
-
-    renderWells(type) {
-        const filteredWells = this.wells.filter(w => w.wellType === type);
-
-        for (const well of filteredWells) {
-            const point = this.map.latLngToContainerPoint([well.latitude, well.longitude]);
-            
-            const isSelected = this.selectedWell && this.selectedWell.wellId === well.wellId;
-            const radius = isSelected ? CONFIG.WELL_RADIUS + 4 : CONFIG.WELL_RADIUS;
-
-            if (type === 'INJECTION') {
-                this.drawInjectionWell(point.x, point.y, radius, isSelected, well);
-            } else {
-                this.drawProductionWell(point.x, point.y, radius, isSelected, well);
-            }
-        }
-    },
-
-    drawInjectionWell(x, y, radius, isSelected, well) {
-        const gradient = this.ctx.createRadialGradient(x, y, 0, x, y, radius);
-        gradient.addColorStop(0, CONFIG.COLORS.INJECTION);
-        gradient.addColorStop(1, '#1565c0');
-
-        this.ctx.beginPath();
-        this.ctx.arc(x, y, radius, 0, Math.PI * 2);
-        this.ctx.fillStyle = gradient;
-        this.ctx.fill();
-
-        this.ctx.strokeStyle = isSelected ? '#ffeb3b' : CONFIG.COLORS.INJECTION_STROKE;
-        this.ctx.lineWidth = isSelected ? 3 : 2;
-        this.ctx.stroke();
-
-        this.ctx.fillStyle = '#fff';
-        this.ctx.font = 'bold 10px Arial';
-        this.ctx.textAlign = 'center';
-        this.ctx.textBaseline = 'middle';
-        this.ctx.fillText('注', x, y);
-    },
-
-    drawProductionWell(x, y, radius, isSelected, well) {
-        this.ctx.beginPath();
-        this.ctx.moveTo(x, y - radius);
-        this.ctx.lineTo(x - radius, y + radius * 0.8);
-        this.ctx.lineTo(x + radius, y + radius * 0.8);
-        this.ctx.closePath();
-
-        const gradient = this.ctx.createLinearGradient(x, y - radius, x, y + radius);
-        gradient.addColorStop(0, CONFIG.COLORS.PRODUCTION);
-        gradient.addColorStop(1, '#c62828');
-
-        this.ctx.fillStyle = gradient;
-        this.ctx.fill();
-
-        this.ctx.strokeStyle = isSelected ? '#ffeb3b' : CONFIG.COLORS.PRODUCTION_STROKE;
-        this.ctx.lineWidth = isSelected ? 3 : 2;
-        this.ctx.stroke();
-
-        this.ctx.fillStyle = '#fff';
-        this.ctx.font = 'bold 9px Arial';
-        this.ctx.textAlign = 'center';
-        this.ctx.textBaseline = 'middle';
-        this.ctx.fillText('采', x, y + 2);
-    },
-
-    renderAllocationArrows() {
-        for (const suggestion of this.suggestions) {
-            if (suggestion.adjustmentDirection === 'KEEP') continue;
-
-            const well = this.wells.find(w => w.wellId === suggestion.wellId);
-            if (!well) continue;
-
-            const point = this.map.latLngToContainerPoint([well.latitude, well.longitude]);
-            
-            const isIncrease = suggestion.adjustmentDirection === 'INCREASE';
-            const arrowLength = 20 + Math.min(Math.abs(suggestion.adjustmentAmount) / 2, 20);
-            const direction = isIncrease ? -1 : 1;
-
-            this.ctx.beginPath();
-            this.ctx.moveTo(point.x, point.y - CONFIG.WELL_RADIUS - 5);
-            this.ctx.lineTo(point.x, point.y - CONFIG.WELL_RADIUS - 5 - arrowLength * direction);
-            this.ctx.strokeStyle = isIncrease ? CONFIG.COLORS.ALLOCATION_INCREASE : CONFIG.COLORS.ALLOCATION_DECREASE;
-            this.ctx.lineWidth = 3;
-            this.ctx.stroke();
-
-            const arrowHeadSize = 6;
-            const arrowY = point.y - CONFIG.WELL_RADIUS - 5 - arrowLength * direction;
-            
-            this.ctx.beginPath();
-            this.ctx.moveTo(point.x, arrowY);
-            this.ctx.lineTo(point.x - arrowHeadSize, arrowY + arrowHeadSize * direction);
-            this.ctx.lineTo(point.x + arrowHeadSize, arrowY + arrowHeadSize * direction);
-            this.ctx.closePath();
-            this.ctx.fillStyle = isIncrease ? CONFIG.COLORS.ALLOCATION_INCREASE : CONFIG.COLORS.ALLOCATION_DECREASE;
-            this.ctx.fill();
-
-            this.ctx.fillStyle = isIncrease ? CONFIG.COLORS.ALLOCATION_INCREASE : CONFIG.COLORS.ALLOCATION_DECREASE;
-            this.ctx.font = 'bold 11px Arial';
-            this.ctx.textAlign = 'center';
-            const labelY = arrowY - (isIncrease ? 8 : -8);
-            this.ctx.fillText((isIncrease ? '+' : '') + suggestion.adjustmentAmount.toFixed(1), point.x, labelY);
-        }
+        this.zonesLayer.eachLayer(l => {
+            if (l.setStyle) l.setStyle({ fillOpacity: 0.2 });
+        });
+        this.buildingsLayer.eachLayer(l => {
+            if (l.setStyle) l.setStyle({ fillOpacity: 0.5 });
+        });
     }
-};
+
+    renderFractalView() {
+        this.syntaxLayer.clearLayers();
+        
+        if (!this.currentSite || !this.currentSite.geom) return;
+
+        this.drawFractalGrid();
+    }
+
+    drawFractalGrid() {
+        if (!this.currentSite || !this.currentSite.geom) return;
+
+        const geom = this.currentSite.geom;
+        const bounds = this.getGeoJSONBounds(geom);
+        if (!bounds) return;
+
+        const center = this.map.getCenter();
+        const zoom = this.map.getZoom();
+        
+        const levels = [1, 2, 4, 8, 16];
+        const colors = ['#ff0000', '#ff6600', '#ffcc00', '#66ff00', '#00ccff'];
+        
+        levels.forEach((level, idx) => {
+            const cellSize = (bounds.maxX - bounds.minX) / level;
+            for (let i = 0; i < level; i++) {
+                for (let j = 0; j < level; j++) {
+                    const x1 = bounds.minX + i * cellSize;
+                    const y1 = bounds.minY + j * cellSize;
+                    const x2 = x1 + cellSize;
+                    const y2 = y1 + cellSize;
+                    
+                    const rect = L.rectangle([[y1, x1], [y2, x2]], {
+                        color: colors[idx],
+                        weight: 1,
+                        fill: false,
+                        opacity: 0.5 - idx * 0.08
+                    }).addTo(this.syntaxLayer);
+                }
+            }
+        });
+    }
+
+    getGeoJSONBounds(geom) {
+        if (!geom || !geom.coordinates) return null;
+
+        let minX = Infinity, maxX = -Infinity;
+        let minY = Infinity, maxY = -Infinity;
+
+        const traverse = (coords) => {
+            if (typeof coords[0] === 'number') {
+                minX = Math.min(minX, coords[0]);
+                maxX = Math.max(maxX, coords[0]);
+                minY = Math.min(minY, coords[1]);
+                maxY = Math.max(maxY, coords[1]);
+            } else {
+                coords.forEach(c => traverse(c));
+            }
+        };
+
+        traverse(geom.coordinates);
+        return { minX, maxX, minY, maxY };
+    }
+
+    updateZoneLegend(zones) {
+        const legend = document.getElementById('zoneLegend');
+        const types = new Set(zones.map(z => z.zone_type));
+        
+        legend.innerHTML = '';
+        types.forEach(type => {
+            const color = CONFIG.ZONE_COLORS[type] || CONFIG.ZONE_COLORS.default;
+            const item = document.createElement('div');
+            item.className = 'legend-item';
+            item.innerHTML = `
+                <div class="legend-color" style="background: ${color}"></div>
+                <span>${type}</span>
+            `;
+            legend.appendChild(item);
+        });
+    }
+
+    setOnZoneClick(callback) {
+        this.onZoneClick = callback;
+    }
+
+    setOnBuildingClick(callback) {
+        this.onBuildingClick = callback;
+    }
+}

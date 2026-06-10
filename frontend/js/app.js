@@ -1,423 +1,248 @@
-let currentBlock = 'ALL';
-let refreshTimer = null;
-
-document.addEventListener('DOMContentLoaded', () => {
-    init();
-});
-
-async function init() {
-    MapManager.init();
-    setupEventListeners();
-    await loadBlocks();
-    await refreshAllData();
-    startAutoRefresh();
-    updateCurrentTime();
-    setInterval(updateCurrentTime, 1000);
-}
-
-function setupEventListeners() {
-    document.getElementById('block-selector').addEventListener('change', (e) => {
-        currentBlock = e.target.value;
-        MapManager.setBlock(currentBlock);
-        refreshCoreIndicators();
-    });
-
-    document.getElementById('show-injection').addEventListener('change', (e) => {
-        MapManager.setLayerVisibility('injection', e.target.checked);
-    });
-
-    document.getElementById('show-production').addEventListener('change', (e) => {
-        MapManager.setLayerVisibility('production', e.target.checked);
-    });
-
-    document.getElementById('show-relations').addEventListener('change', (e) => {
-        MapManager.setLayerVisibility('relations', e.target.checked);
-    });
-
-    document.getElementById('show-allocation').addEventListener('change', (e) => {
-        MapManager.setLayerVisibility('allocation', e.target.checked);
-    });
-}
-
-async function loadBlocks() {
-    try {
-        const data = await API.getBlocks();
-        const selector = document.getElementById('block-selector');
+class App {
+    constructor() {
+        this.cityMap = new CityMap();
+        this.timeline = new Timeline();
+        this.morphologyAnalyzer = new MorphologyAnalyzer();
+        this.trendAnalyzer = new TrendAnalyzer();
+        this.compareModal = new CompareModal();
         
-        for (const block of data.blocks || []) {
-            const option = document.createElement('option');
-            option.value = block;
-            option.textContent = block;
-            selector.appendChild(option);
-        }
-    } catch (error) {
-        console.error('Failed to load blocks:', error);
-    }
-}
-
-async function refreshAllData() {
-    await Promise.all([
-        MapManager.loadData(),
-        refreshCoreIndicators(),
-        refreshAlarms()
-    ]);
-}
-
-async function refreshCoreIndicators() {
-    try {
-        const data = await API.getCoreIndicators(currentBlock);
-        
-        document.getElementById('daily-oil').textContent = 
-            data.dailyOilProduction?.toFixed(2) || '--';
-        document.getElementById('daily-water').textContent = 
-            data.dailyWaterInjection?.toFixed(2) || '--';
-        document.getElementById('water-cut').textContent = 
-            data.comprehensiveWaterCut?.toFixed(2) || '--';
-
-        const changes = data.dayOverDayChanges || {};
-        
-        const oilChangeEl = document.getElementById('oil-change');
-        const waterChangeEl = document.getElementById('water-change');
-        const cutChangeEl = document.getElementById('cut-change');
-
-        updateChangeIndicator(oilChangeEl, changes.oilChange, true);
-        updateChangeIndicator(waterChangeEl, changes.waterChange, false);
-        updateChangeIndicator(cutChangeEl, changes.waterCutChange, false);
-
-    } catch (error) {
-        console.error('Failed to refresh core indicators:', error);
-    }
-}
-
-function updateChangeIndicator(element, value, isOil) {
-    if (value === undefined || value === null) {
-        element.textContent = '--';
-        element.className = 'indicator-change';
-        return;
+        this.dynasties = [];
+        this.allSites = [];
+        this.currentSite = null;
     }
 
-    const prefix = value >= 0 ? '+' : '';
-    element.textContent = `${prefix}${value.toFixed(2)}%`;
-    
-    if (isOil) {
-        element.className = value >= 0 ? 'indicator-change positive' : 'indicator-change negative';
-    } else {
-        element.className = value <= 0 ? 'indicator-change positive' : 'indicator-change negative';
-    }
-}
+    async init() {
+        this.cityMap.init();
+        this.morphologyAnalyzer.init();
+        this.trendAnalyzer.init();
 
-async function refreshAlarms() {
-    try {
-        const data = await API.getAlarms();
-        
-        document.getElementById('alarm-badge').textContent = data.count || 0;
-        
-        const alarmListEl = document.getElementById('alarm-list');
-        
-        if (!data.alarms || data.alarms.length === 0) {
-            alarmListEl.innerHTML = '<div class="no-data">暂无告警</div>';
-            return;
+        this.cityMap.setOnZoneClick((zone) => this.showZoneDetail(zone));
+        this.cityMap.setOnBuildingClick((building) => this.showBuildingDetail(building));
+
+        try {
+            this.dynasties = await API.getDynasties();
+            this.timeline.init(this.dynasties);
+            this.populateDynastySelect();
+            
+            this.timeline.setOnDynastyChange((dynasty) => this.onDynastyChange(dynasty));
+        } catch (error) {
+            console.error('加载朝代数据失败:', error);
         }
 
-        alarmListEl.innerHTML = data.alarms.slice(0, 10).map(alarm => `
-            <div class="alarm-item level-${alarm.alarmLevel === 'LEVEL_1' ? '1' : '2'}" 
-                 onclick="handleAlarmClick(${alarm.id}, '${alarm.wellId}')">
-                <div class="alarm-type">${alarm.alarmLevel === 'LEVEL_1' ? '一级水淹预警' : '二级井筒异常'}</div>
-                <div class="alarm-message">${alarm.alarmMessage}</div>
-                <div class="alarm-time">${formatTime(alarm.alarmTime)}</div>
-            </div>
-        `).join('');
+        try {
+            this.allSites = await API.getCitySites();
+            this.populateSiteSelect(this.allSites);
+            this.compareModal.init(this.allSites);
+            
+            if (this.allSites.length > 0) {
+                this.selectSite(this.allSites[0]);
+            }
+        } catch (error) {
+            console.error('加载城市遗址数据失败:', error);
+        }
 
-    } catch (error) {
-        console.error('Failed to refresh alarms:', error);
-    }
-}
+        document.getElementById('dynastySelect').addEventListener('change', (e) => {
+            this.filterSitesByDynasty(e.target.value);
+        });
 
-function handleAlarmClick(alarmId, wellId) {
-    API.acknowledgeAlarm(alarmId).then(() => {
-        refreshAlarms();
-    });
-    
-    if (wellId) {
-        API.getWellById(wellId).then(well => {
-            if (well) {
-                MapManager.selectWell(well);
-                MapManager.map.flyTo([well.latitude, well.longitude], 14);
+        document.getElementById('siteSelect').addEventListener('change', (e) => {
+            const siteId = parseInt(e.target.value);
+            const site = this.allSites.find(s => s.id === siteId);
+            if (site) {
+                this.selectSite(site);
             }
         });
     }
-}
 
-async function showWellDetail(well) {
-    const panel = document.getElementById('detail-panel');
-    const titleEl = document.getElementById('detail-title');
-    const contentEl = document.getElementById('detail-content');
-
-    titleEl.textContent = `${well.wellName} - ${well.wellType === 'INJECTION' ? '注水井' : '采油井'}`;
-    panel.style.display = 'flex';
-
-    contentEl.innerHTML = `
-        <div class="well-info-grid">
-            <div class="info-item">
-                <div class="info-label">井号</div>
-                <div class="info-value">${well.wellId}</div>
-            </div>
-            <div class="info-item">
-                <div class="info-label">区块</div>
-                <div class="info-value">${well.blockName}</div>
-            </div>
-            <div class="info-item">
-                <div class="info-label">状态</div>
-                <div class="info-value">${well.status === 'ACTIVE' ? '正常' : '停用'}</div>
-            </div>
-            <div class="info-item">
-                <div class="info-label">经度</div>
-                <div class="info-value">${well.longitude?.toFixed(6) || '--'}</div>
-            </div>
-            <div class="info-item">
-                <div class="info-label">纬度</div>
-                <div class="info-value">${well.latitude?.toFixed(6) || '--'}</div>
-            </div>
-            ${well.wellType === 'INJECTION' ? `
-                <div class="info-item">
-                    <div class="info-label">设计压力</div>
-                    <div class="info-value">${well.designPressure?.toFixed(2) || '--'} MPa</div>
-                </div>
-                <div class="info-item">
-                    <div class="info-label">日注水量</div>
-                    <div class="info-value">${well.latestWaterVolume?.toFixed(2) || '--'} m³</div>
-                </div>
-                <div class="info-item">
-                    <div class="info-label">注水压力</div>
-                    <div class="info-value">${well.latestInjectionPressure?.toFixed(2) || '--'} MPa</div>
-                </div>
-            ` : `
-                <div class="info-item">
-                    <div class="info-label">日产油量</div>
-                    <div class="info-value">${well.latestOilVolume?.toFixed(2) || '--'} t</div>
-                </div>
-                <div class="info-item">
-                    <div class="info-label">含水率</div>
-                    <div class="info-value">${well.latestWaterCut?.toFixed(2) || '--'}%</div>
-                </div>
-            `}
-        </div>
-
-        <div class="chart-container">
-            <h4>近90天生产趋势</h4>
-            <div class="chart-wrapper">
-                <canvas id="trend-chart"></canvas>
-            </div>
-        </div>
-
-        <div class="chart-container">
-            <h4>注采对应分析</h4>
-            <div class="chart-wrapper">
-                <canvas id="relation-chart"></canvas>
-            </div>
-        </div>
-
-        <div id="allocation-section" style="${well.wellType === 'INJECTION' ? '' : 'display: none;'}">
-            <div class="chart-container">
-                <h4>最新调配建议</h4>
-                <div id="allocation-content">
-                    <div class="no-data">加载中...</div>
-                </div>
-            </div>
-        </div>
-
-        <div class="relation-analysis">
-            <h4>注采对应关系</h4>
-            <div id="relation-list">
-                <div class="no-data">加载中...</div>
-            </div>
-        </div>
-    `;
-
-    try {
-        const [trendData, relations, suggestions] = await Promise.all([
-            API.getWellTrend(well.wellId, 90),
-            API.getRelationsByWell(well.wellId, well.wellType),
-            well.wellType === 'INJECTION' ? API.getLatestSuggestions() : null
-        ]);
-
-        if (trendData) {
-            ChartManager.createProductionTrend('trend-chart', trendData);
-        }
-
-        if (well.wellType === 'INJECTION') {
-            const wellSuggestion = suggestions?.suggestions?.find(s => s.wellId === well.wellId);
-            renderAllocationSuggestion(wellSuggestion);
-        }
-
-        renderRelationAnalysis(relations, well.wellType);
-
-        const relatedWellTrend = await getRelatedWellTrend(well, relations);
-        if (relatedWellTrend) {
-            ChartManager.createInjectionProductionAnalysis('relation-chart', trendData, relatedWellTrend);
-        }
-
-    } catch (error) {
-        console.error('Failed to load well detail:', error);
-    }
-}
-
-function closeDetailPanel() {
-    document.getElementById('detail-panel').style.display = 'none';
-    MapManager.selectedWell = null;
-    MapManager.render();
-    ChartManager.destroyAll();
-}
-
-async function getRelatedWellTrend(well, relations) {
-    if (!relations || relations.length === 0) return null;
-
-    let relatedWellId = null;
-    if (well.wellType === 'INJECTION') {
-        relatedWellId = relations[0]?.productionWellId;
-    } else {
-        relatedWellId = relations[0]?.injectionWellId;
+    populateDynastySelect() {
+        const select = document.getElementById('dynastySelect');
+        const options = this.dynasties
+            .sort((a, b) => a.start_year - b.start_year)
+            .map(d => `<option value="${d.id}">${d.name}</option>`)
+            .join('');
+        
+        select.innerHTML = '<option value="">全部朝代</option>' + options;
     }
 
-    if (!relatedWellId) return null;
-
-    return await API.getWellTrend(relatedWellId, 90);
-}
-
-function renderAllocationSuggestion(suggestion) {
-    const contentEl = document.getElementById('allocation-content');
-    
-    if (!suggestion) {
-        contentEl.innerHTML = '<div class="no-data">暂无调配建议</div>';
-        return;
+    populateSiteSelect(sites) {
+        const select = document.getElementById('siteSelect');
+        const options = sites
+            .sort((a, b) => (a.dynasty_name || '').localeCompare(b.dynasty_name || ''))
+            .map(s => `<option value="${s.id}">${s.dynasty_name || ''} - ${s.name}</option>`)
+            .join('');
+        
+        select.innerHTML = '<option value="">选择城市遗址</option>' + options;
     }
 
-    contentEl.innerHTML = `
-        <div class="allocation-item">
-            <div class="allocation-header">
-                <span>建议日期: ${suggestion.suggestionDate}</span>
-                <span class="direction ${suggestion.adjustmentDirection}">
-                    ${suggestion.adjustmentDirection === 'INCREASE' ? '增加' : 
-                      suggestion.adjustmentDirection === 'DECREASE' ? '减少' : '保持'}
-                </span>
-            </div>
-            <div style="display: flex; gap: 20px; margin-bottom: 8px;">
-                <div>
-                    <div class="info-label">当前注水量</div>
-                    <div class="info-value">${suggestion.currentWaterVolume.toFixed(2)} m³</div>
-                </div>
-                <div>
-                    <div class="info-label">建议注水量</div>
-                    <div class="info-value">${suggestion.suggestedWaterVolume.toFixed(2)} m³</div>
-                </div>
-                <div>
-                    <div class="info-label">调整量</div>
-                    <div class="info-value" style="color: ${
-                        suggestion.adjustmentAmount > 0 ? '#4caf50' : 
-                        suggestion.adjustmentAmount < 0 ? '#f44336' : '#9e9e9e'
-                    }">
-                        ${suggestion.adjustmentAmount > 0 ? '+' : ''}${suggestion.adjustmentAmount.toFixed(2)} m³
-                    </div>
-                </div>
-            </div>
-            <div class="reason">${suggestion.reason || '暂无详细说明'}</div>
-        </div>
-    `;
-}
-
-function renderRelationAnalysis(relations, wellType) {
-    const listEl = document.getElementById('relation-list');
-    
-    if (!relations || relations.length === 0) {
-        listEl.innerHTML = '<div class="no-data">暂无注采对应关系</div>';
-        return;
+    filterSitesByDynasty(dynastyId) {
+        if (!dynastyId) {
+            this.populateSiteSelect(this.allSites);
+            return;
+        }
+        
+        const filtered = this.allSites.filter(s => s.dynasty_id === parseInt(dynastyId));
+        this.populateSiteSelect(filtered);
+        
+        if (filtered.length > 0) {
+            this.selectSite(filtered[0]);
+        } else {
+            this.cityMap.loadSite(null);
+            this.currentSite = null;
+            this.updateSiteInfo(null);
+            this.morphologyAnalyzer.setSite(null);
+        }
     }
 
-    const getEffectivenessClass = (type) => {
-        switch (type) {
-            case 'HIGH': return 'high';
-            case 'MEDIUM': return 'medium';
-            case 'LOW': return 'low';
-            default: return '';
-        }
-    };
+    onDynastyChange(dynasty) {
+        document.getElementById('dynastySelect').value = dynasty.id;
+        this.filterSitesByDynasty(dynasty.id);
+    }
 
-    const getEffectivenessText = (type) => {
-        switch (type) {
-            case 'HIGH': return '高效';
-            case 'MEDIUM': return '中等';
-            case 'LOW': return '无效';
-            default: return '未知';
-        }
-    };
+    selectSite(site) {
+        this.currentSite = site;
+        document.getElementById('siteSelect').value = site.id;
+        
+        this.cityMap.loadSite(site);
+        this.updateSiteInfo(site);
+        this.morphologyAnalyzer.setSite(site.id);
+        
+        this.clearDetailPanels();
+    }
 
-    listEl.innerHTML = relations.slice(0, 8).map(rel => {
-        const relatedWellId = wellType === 'INJECTION' ? rel.productionWellId : rel.injectionWellId;
-        return `
-            <div class="relation-item ${getEffectivenessClass(rel.effectivenessType)}">
-                <span class="well-name">${relatedWellId}</span>
-                <span class="effectiveness">
-                    ${getEffectivenessText(rel.effectivenessType)}
-                    ${rel.effectivenessDegree ? `(${rel.effectivenessDegree.toFixed(1)}%)` : ''}
-                </span>
+    updateSiteInfo(site) {
+        const container = document.getElementById('siteInfo');
+        
+        if (!site) {
+            container.innerHTML = '<p class="placeholder">请选择一个城市遗址</p>';
+            return;
+        }
+
+        container.innerHTML = `
+            <div class="info-item">
+                <div class="info-label">名称</div>
+                <div class="info-value">${site.name}</div>
             </div>
+            <div class="info-item">
+                <div class="info-label">朝代</div>
+                <div class="info-value">${site.dynasty_name || '未知'}</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">位置</div>
+                <div class="info-value">${site.location || '未知'}</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">中心坐标</div>
+                <div class="info-value">${site.center_longitude.toFixed(4)}, ${site.center_latitude.toFixed(4)}</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">面积</div>
+                <div class="info-value">${site.area_sq_km ? site.area_sq_km.toFixed(2) + ' km²' : '未知'}</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">估算人口</div>
+                <div class="info-value">${site.estimated_population ? site.estimated_population.toLocaleString() + ' 人' : '未知'}</div>
+            </div>
+            ${site.description ? `
+            <div class="info-item">
+                <div class="info-label">描述</div>
+                <div class="info-value" style="font-weight: normal; font-size: 12px;">${site.description}</div>
+            </div>
+            ` : ''}
+            ${site.archaeological_notes ? `
+            <div class="info-item">
+                <div class="info-label">考古备注</div>
+                <div class="info-value" style="font-weight: normal; font-size: 12px;">${site.archaeological_notes}</div>
+            </div>
+            ` : ''}
         `;
-    }).join('');
-}
+    }
 
-async function runAllocation() {
-    if (confirm('确定要立即生成注水调配建议吗？此过程可能需要几秒钟。')) {
-        try {
-            await API.runAllocation();
-            await MapManager.loadData();
-            alert('调配建议生成成功！');
-        } catch (error) {
-            console.error('Failed to run allocation:', error);
-            alert('调配建议生成失败，请检查后端服务。');
-        }
+    showZoneDetail(zone) {
+        const container = document.getElementById('zoneDetail');
+        
+        const color = CONFIG.ZONE_COLORS[zone.zone_type] || CONFIG.ZONE_COLORS.default;
+        
+        container.innerHTML = `
+            <div class="detail-title" style="color: ${color}">
+                ${zone.name || zone.zone_type}
+            </div>
+            <div class="detail-section">
+                <h4>类型</h4>
+                <p>${zone.zone_type}</p>
+            </div>
+            <div class="detail-section">
+                <h4>置信度</h4>
+                <div class="confidence-bar">
+                    <div class="confidence-fill" style="width: ${(zone.confidence_level || 0) * 100}%"></div>
+                </div>
+                <p style="margin-top: 4px; font-size: 11px;">${((zone.confidence_level || 0) * 100).toFixed(0)}%</p>
+            </div>
+            ${zone.description ? `
+            <div class="detail-section">
+                <h4>描述</h4>
+                <p>${zone.description}</p>
+            </div>
+            ` : ''}
+            ${zone.archaeological_findings ? `
+            <div class="detail-section">
+                <h4>考古发现</h4>
+                <p>${zone.archaeological_findings}</p>
+            </div>
+            ` : ''}
+            ${zone.functional_inference ? `
+            <div class="detail-section">
+                <h4>功能推断</h4>
+                <p>${zone.functional_inference}</p>
+            </div>
+            ` : ''}
+        `;
+    }
+
+    showBuildingDetail(building) {
+        const container = document.getElementById('buildingDetail');
+        
+        const color = CONFIG.BUILDING_COLORS[building.building_type] || CONFIG.BUILDING_COLORS.default;
+        
+        container.innerHTML = `
+            <div class="detail-title" style="color: ${color}">
+                ${building.name || building.building_type}
+            </div>
+            <div class="detail-section">
+                <h4>类型</h4>
+                <p>${building.building_type || '未知'}</p>
+            </div>
+            <div class="detail-section">
+                <h4>建筑面积</h4>
+                <p>${building.area_sq_m ? building.area_sq_m.toFixed(1) + ' 平方米' : '未知'}</p>
+            </div>
+            <div class="detail-section">
+                <h4>房间数</h4>
+                <p>${building.rooms_count || '未知'}</p>
+            </div>
+            ${building.description ? `
+            <div class="detail-section">
+                <h4>描述</h4>
+                <p>${building.description}</p>
+            </div>
+            ` : ''}
+            ${building.archaeological_findings ? `
+            <div class="detail-section">
+                <h4>出土文物</h4>
+                <p>${building.archaeological_findings}</p>
+            </div>
+            ` : ''}
+        `;
+    }
+
+    clearDetailPanels() {
+        document.getElementById('zoneDetail').innerHTML = 
+            '<p class="placeholder">点击地图上的功能区查看详情</p>';
+        document.getElementById('buildingDetail').innerHTML = 
+            '<p class="placeholder">点击地图上的建筑基址查看详情</p>';
     }
 }
 
-async function checkAlarms() {
-    try {
-        await API.checkAlarms();
-        await refreshAlarms();
-        alert('告警检查完成！');
-    } catch (error) {
-        console.error('Failed to check alarms:', error);
-        alert('告警检查失败，请检查后端服务。');
-    }
-}
-
-function startAutoRefresh() {
-    if (refreshTimer) {
-        clearInterval(refreshTimer);
-    }
-    refreshTimer = setInterval(() => {
-        refreshAllData();
-    }, CONFIG.REFRESH_INTERVAL);
-}
-
-function updateCurrentTime() {
-    const now = new Date();
-    const timeStr = now.toLocaleString('zh-CN', {
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit'
-    });
-    document.getElementById('current-time').textContent = timeStr;
-}
-
-function formatTime(timeStr) {
-    if (!timeStr) return '--';
-    const date = new Date(timeStr);
-    return date.toLocaleString('zh-CN', {
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit'
-    });
-}
+document.addEventListener('DOMContentLoaded', () => {
+    const app = new App();
+    app.init();
+});

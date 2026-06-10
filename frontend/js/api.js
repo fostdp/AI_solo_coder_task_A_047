@@ -1,75 +1,96 @@
 const API = {
-    async getWells(wellType, blockName) {
-        const params = new URLSearchParams();
-        if (wellType) params.append('wellType', wellType);
-        if (blockName && blockName !== 'ALL') params.append('blockName', blockName);
-        
-        const response = await fetch(`${CONFIG.API_BASE_URL}/wells?${params}`);
-        return response.json();
+    async get(url) {
+        try {
+            const response = await fetch(`${CONFIG.API_BASE_URL}${url}`);
+            const data = await response.json();
+            if (data.success) {
+                return data.data;
+            } else {
+                throw new Error(data.message || '请求失败');
+            }
+        } catch (error) {
+            console.error('API GET Error:', error);
+            throw error;
+        }
     },
 
-    async getWellById(wellId) {
-        const response = await fetch(`${CONFIG.API_BASE_URL}/wells/${wellId}`);
-        return response.json();
+    async post(url, body) {
+        try {
+            const response = await fetch(`${CONFIG.API_BASE_URL}${url}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(body)
+            });
+            const data = await response.json();
+            if (data.success) {
+                return data.data;
+            } else {
+                throw new Error(data.message || '请求失败');
+            }
+        } catch (error) {
+            console.error('API POST Error:', error);
+            throw error;
+        }
     },
 
-    async getWellTrend(wellId, days = 90) {
-        const response = await fetch(`${CONFIG.API_BASE_URL}/wells/${wellId}/trend?days=${days}`);
-        return response.json();
+    getDynasties() {
+        return this.get('/dynasties');
     },
 
-    async getBlocks() {
-        const response = await fetch(`${CONFIG.API_BASE_URL}/wells/blocks`);
-        return response.json();
+    getCitySites() {
+        return this.get('/sites');
     },
 
-    async getCoreIndicators(blockName = 'ALL') {
-        const response = await fetch(`${CONFIG.API_BASE_URL}/summary/core-indicators?blockName=${blockName}`);
-        return response.json();
+    getCitySiteById(id) {
+        return this.get(`/sites/${id}`);
     },
 
-    async getRelations(blockName) {
-        const params = new URLSearchParams();
-        if (blockName && blockName !== 'ALL') params.append('blockName', blockName);
-        
-        const response = await fetch(`${CONFIG.API_BASE_URL}/relations/map-data?${params}`);
-        return response.json();
+    getSitesByDynasty(dynastyId) {
+        return this.get(`/sites/dynasty/${dynastyId}`);
     },
 
-    async getLatestSuggestions() {
-        const response = await fetch(`${CONFIG.API_BASE_URL}/allocation/latest`);
-        return response.json();
+    getFunctionalZones(siteId) {
+        return this.get(`/zones/${siteId}`);
     },
 
-    async getAlarms() {
-        const response = await fetch(`${CONFIG.API_BASE_URL}/alarms/unacknowledged`);
-        return response.json();
+    getRoads(siteId) {
+        return this.get(`/roads/${siteId}`);
     },
 
-    async runAllocation() {
-        const response = await fetch(`${CONFIG.API_BASE_URL}/allocation/run-now`, {
-            method: 'POST'
+    getBuildings(siteId) {
+        return this.get(`/buildings/${siteId}`);
+    },
+
+    getPopulation(siteId) {
+        return this.get(`/population/${siteId}`);
+    },
+
+    getMorphology(siteId) {
+        return this.get(`/morphology/${siteId}`);
+    },
+
+    analyzeMorphology(siteId) {
+        return this.post(`/morphology/analyze/${siteId}`, {});
+    },
+
+    getRoadSyntax(siteId) {
+        return this.get(`/syntax/roads/${siteId}`);
+    },
+
+    analyzeTrends(indicator, dynastyIds) {
+        return this.post('/trends/analyze', {
+            indicator: indicator,
+            dynasty_ids: dynastyIds
         });
-        return response.json();
     },
 
-    async checkAlarms() {
-        const response = await fetch(`${CONFIG.API_BASE_URL}/alarms/check-now`, {
-            method: 'POST'
-        });
-        return response.json();
+    getTrends() {
+        return this.get('/trends');
     },
 
-    async acknowledgeAlarm(alarmId) {
-        const response = await fetch(`${CONFIG.API_BASE_URL}/alarms/${alarmId}/acknowledge`, {
-            method: 'POST'
-        });
-        return response.json();
-    },
-
-    async getRelationsByWell(wellId, wellType) {
-        const endpoint = wellType === 'INJECTION' ? 'injection' : 'production';
-        const response = await fetch(`${CONFIG.API_BASE_URL}/relations/${endpoint}/${wellId}`);
-        return response.json();
+    compareSites(siteIds) {
+        return this.post('/compare', { site_ids: siteIds });
     }
 };

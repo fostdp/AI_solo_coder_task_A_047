@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  postgis:
+    image: postgis/postgis:15-3.4
+    container_name: ancient-city-postgis
+    environment:
+      POSTGRES_DB: ancient_city
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgis_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    container_name: ancient-city-backend
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgis:5432/ancient_city
+      RUST_LOG: info
+      PORT: 8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    image: nginx:alpine
+    container_name: ancient-city-frontend
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgis_data:
